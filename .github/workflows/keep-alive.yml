@@ -1,0 +1,15 @@
+name: Keep Render service awake
+
+on:
+  schedule:
+    # Renderの無料プランは15分アクセスがないとスリープするため、10分おきにpingして起こし続ける。
+    # GitHub Actionsのスケジュール実行は負荷状況によって数分遅延することがあるため、15分ぎりぎりを狙わず余裕を持たせている。
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping build-info endpoint
+        run: curl -sS -o /dev/null -w "status=%{http_code} time=%{time_total}s\n" https://drill-tracker.onrender.com/api/build-info

@@ -49,11 +49,14 @@ body {
   padding: 14px 16px; border-bottom: 1px solid var(--border);
 }
 .app-header h1 { font-size: 18px; margin: 0 auto 0 0; letter-spacing: 0.02em; }
-.streak-chip { font-size: 13px; color: var(--text-dim); }
+.streak-chip { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text-dim); }
+.streak-chip .streak-flame { width: 15px; height: 15px; color: var(--accent); flex-shrink: 0; }
 .icon-btn {
-  background: none; border: none; color: var(--text); font-size: 19px;
+  background: none; border: none; color: var(--text);
+  display: inline-flex; align-items: center; justify-content: center;
   line-height: 1; padding: 4px; cursor: pointer;
 }
+.icon-btn svg { width: 20px; height: 20px; }
 
 #app-main { padding: 12px 12px 24px; max-width: 640px; margin: 0 auto; }
 
@@ -94,6 +97,13 @@ body {
 /* flex: 1 1 auto で余白を必ずここに集約する。こうしないと、隣接するタイトル文字数の違い
    (本編/EXERCISEなど)によって右側の評価ボタン列の位置が行ごとにズレて見える */
 .problem-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+/* 狭い画面では「タイトル+評価5ボタン+メモボタン」を1行に収めようとすると、タイトルの取り分が
+   100px前後まで潰れて不自然な位置で折り返す(例: 「数学B」の途中で改行される)。420px以下では
+   タイトル行を単独の1行に回し、評価ボタン列はその下の行に折り返す(2026-09-07発覚・対応) */
+@media (max-width: 420px) {
+  .problem-row { flex-wrap: wrap; }
+  .problem-info { flex: 1 1 100%; }
+}
 .problem-info .p-num { font-weight: 600; font-size: 15px; }
 .problem-info .p-meta { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rate-buttons-inline { display: flex; gap: 4px; flex-shrink: 0; }
@@ -132,9 +142,11 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 .retire-btn {
   background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 6px;
   font-size: 11px; padding: 4px 6px; cursor: pointer; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.retire-btn svg { width: 15px; height: 15px; }
 .retire-btn.active { color: var(--accent); border-color: var(--accent); }
-/* 本棚の実際の「もう出さない/解除」トグルはテキスト長が変わる(retire-btnは📝アイコン等と共用のため
+/* 本棚の実際の「もう出さない/解除」トグルはテキスト長が変わる(retire-btnはメモアイコンボタンと共用のため
    ここだけ固定幅にして、評価ボタン列の位置がretired状態によって行間でズレないようにする) */
 .retire-toggle { min-width: 78px; text-align: center; }
 .problem-row.retired { opacity: 0.45; }
@@ -154,15 +166,24 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 /* メモ */
 .notes-filters { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
 .notes-filters select, .notes-filters input { flex: 1; min-width: 100px; }
+/* 3つのフィルター(本/ミスタイプ/キーワード)を1行に収めると、狭い画面では
+   各項目が100px前後まで潰れ「すべてのミスタイプ」等のラベルが読めなくなる。
+   420px以下では縦積みにして、選択肢・入力欄の文字を最後まで読めるようにする(2026-09-07対応) */
+@media (max-width: 420px) {
+  .notes-filters { flex-direction: column; }
+  .notes-filters select, .notes-filters input { width: 100%; }
+}
 .notes-list { display: flex; flex-direction: column; gap: 8px; }
 .note-card { background: var(--bg-card); border-radius: 10px; padding: 10px 12px; }
 .note-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .note-card .note-meta { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
 .note-card .note-summary { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
 .note-delete-btn {
-  background: none; border: none; color: var(--text-dim); font-size: 16px;
+  background: none; border: none; color: var(--text-dim);
+  display: inline-flex; align-items: center; justify-content: center;
   line-height: 1; padding: 2px 4px; cursor: pointer; flex-shrink: 0;
 }
+.note-delete-btn svg { width: 15px; height: 15px; }
 .note-delete-btn:hover { color: var(--bad); }
 .note-tag {
   display: inline-block; background: var(--accent-dim); color: var(--accent);

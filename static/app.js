@@ -168,6 +168,16 @@ function newClientId() {
   return "cid-" + Date.now() + "-" + Math.random().toString(16).slice(2);
 }
 
+// ---------- アイコン(絵文字を使わず、アプリのトーンに合わせた線画SVGを共通定義) ----------
+
+const ICON_PENCIL =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M4 20l4-1 11-11a2 2 0 0 0-3-3L5 16l-1 4z"/></svg>';
+const ICON_TRASH =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/>' +
+  '<line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+
 const RATING_LABELS = { 1: "難問", 2: "惜しい", 3: "苦戦", 4: "良好", 5: "即答" };
 
 // ---------- 全体state ----------
@@ -249,7 +259,7 @@ function renderTodayRow(problem) {
   }
   const memoBtn = document.createElement("button");
   memoBtn.className = "retire-btn";
-  memoBtn.textContent = "📝";
+  memoBtn.innerHTML = ICON_PENCIL;
   memoBtn.title = "メモを付けて記録";
   memoBtn.addEventListener("click", () => openRateModal(problem, { onDone: () => markTodayRowDone(row) }));
 
@@ -365,9 +375,15 @@ document.getElementById("rate-modal-submit").addEventListener("click", async () 
 // ---------- 本棚タブ ----------
 
 async function loadBookshelf() {
+  // 「books配列を取得済みか」と「本棚タブの<select>をまだ組み立てていないか」は別物として扱う。
+  // openOnboarding()等、他の呼び出し元が先にstate.booksだけ埋めていることがあり(初回起動時のオンボーディング自動表示が該当)、
+  // 以前はstate.books.length===0だけで判定していたため、その場合<select>もcurrentBookIdも一生初期化されず
+  // 本棚タブが空白のまま固まるバグがあった(2026-09-07発覚)。
   if (state.books.length === 0) {
     state.books = await api("/api/books");
-    const sel = document.getElementById("book-select");
+  }
+  const sel = document.getElementById("book-select");
+  if (sel.options.length === 0) {
     sel.innerHTML = "";
     state.books.forEach((b) => {
       const opt = document.createElement("option");
@@ -376,6 +392,8 @@ async function loadBookshelf() {
       sel.appendChild(opt);
     });
     sel.addEventListener("change", () => renderBookshelfBook(Number(sel.value)));
+  }
+  if (!state.currentBookId) {
     state.currentBookId = state.books[0]?.id;
   }
   if (state.currentBookId) {
@@ -481,7 +499,7 @@ function renderBookshelfRow(problem, book) {
   }
   const memoBtn = document.createElement("button");
   memoBtn.className = "retire-btn";
-  memoBtn.textContent = "📝";
+  memoBtn.innerHTML = ICON_PENCIL;
   memoBtn.title = "メモを付けて記録";
   memoBtn.addEventListener("click", () =>
     openRateModal(namedProblem, { onDone: () => renderBookshelfBook(state.currentBookId) })
@@ -542,7 +560,7 @@ function renderProblemHistory(panelEl, detail) {
     delBtn.type = "button";
     delBtn.className = "note-delete-btn";
     delBtn.setAttribute("aria-label", "この記録を削除");
-    delBtn.textContent = "🗑";
+    delBtn.innerHTML = ICON_TRASH;
     delBtn.addEventListener("click", async () => {
       if (!confirm("この記録を削除しますか?間違えて付けた評価を取り消す場合はここから削除できます。")) return;
       await api(`/api/attempts/${a.id}`, { method: "DELETE" }).catch(() => showToast("削除に失敗しました"));
@@ -629,7 +647,7 @@ function renderNoteCard(note) {
   delBtn.type = "button";
   delBtn.className = "note-delete-btn";
   delBtn.setAttribute("aria-label", "削除");
-  delBtn.textContent = "🗑";
+  delBtn.innerHTML = ICON_TRASH;
   delBtn.addEventListener("click", () => deleteNote(note, card));
   header.appendChild(meta);
   header.appendChild(delBtn);
@@ -670,7 +688,7 @@ async function loadStats() {
 
 function renderStats(data) {
   document.getElementById("stats-streak-num").textContent = data.streak_days;
-  document.getElementById("header-streak").textContent = `🔥 ${data.streak_days}`;
+  document.getElementById("header-streak-num").textContent = data.streak_days;
   const paceEl = document.getElementById("stats-pace-text");
   if (data.exam_target_date && data.days_left != null) {
     paceEl.textContent =

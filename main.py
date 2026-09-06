@@ -3,8 +3,11 @@ import uuid
 from datetime import date as dtdate
 from datetime import datetime
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from database import (
@@ -321,17 +324,33 @@ def queue_today(date: str):
     conn = get_connection()
     daily_target = int(_get_setting(conn, "daily_target", "8"))
 
+    solved_today = conn.execute(
+        "SELECT COUNT(*) FROM attempts WHERE source = 'solve' AND local_date = ?", (date,)
+    ).fetchone()[0]
+
     overdue_total = conn.execute(
         "SELECT COUNT(*) FROM problems WHERE retired_at IS NULL "
         "AND srs_next_due_date IS NOT NULL AND srs_next_due_date <= ?",
         (date,),
     ).fetchone()[0]
 
+    problem_display_cols = (
+        "p.*, b.id AS book_id, b.title AS book_title, s.name AS section_name, "
+        "c.name AS chapter_name, u.name AS unit_name"
+    )
+    problem_display_joins = (
+        "JOIN sections s ON p.section_id = s.id "
+        "JOIN books b ON s.book_id = b.id "
+        "JOIN units u ON p.unit_id = u.id "
+        "JOIN chapters c ON u.chapter_id = c.id"
+    )
+
     review_queue = rows_to_dicts(
         conn.execute(
-            "SELECT * FROM problems WHERE retired_at IS NULL "
-            "AND srs_next_due_date IS NOT NULL AND srs_next_due_date <= ? "
-            "ORDER BY srs_last_rating ASC, srs_next_due_date ASC, catalog_order ASC "
+            f"SELECT {problem_display_cols} FROM problems p {problem_display_joins} "
+            "WHERE p.retired_at IS NULL "
+            "AND p.srs_next_due_date IS NOT NULL AND p.srs_next_due_date <= ? "
+            "ORDER BY p.srs_last_rating ASC, p.srs_next_due_date ASC, p.catalog_order ASC "
             "LIMIT ?",
             (date, daily_target),
         )
@@ -343,7 +362,8 @@ def queue_today(date: str):
     if remaining > 0:
         new_queue = rows_to_dicts(
             conn.execute(
-                "SELECT * FROM problems p WHERE p.retired_at IS NULL "
+                f"SELECT {problem_display_cols} FROM problems p {problem_display_joins} "
+                "WHERE p.retired_at IS NULL "
                 "AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.problem_id = p.id) "
                 "ORDER BY p.catalog_order ASC LIMIT ?",
                 (remaining,),
@@ -355,6 +375,7 @@ def queue_today(date: str):
     return {
         "date": date,
         "daily_target": daily_target,
+        "solved_today": solved_today,
         "overdue_total": overdue_total,
         "review_count": len(review_queue),
         "new_count": len(new_queue),
@@ -580,8 +601,37 @@ def build_info():
     return {"lastUpdated": LAST_UPDATED}
 
 
+# ---------- static frontend ----------
+# study-trackerと同じパターン: デプロイのたびに変わるLAST_UPDATEDをapp.js/style.cssの
+# URLに付与し、PWAがタブを閉じずに再開してもブラウザキャッシュに古いJSが残らないようにする。
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+_INDEX_HTML_CACHE: Optional[str] = None
+
+
+def _render_index_html() -> str:
+    global _INDEX_HTML_CACHE
+    if _INDEX_HTML_CACHE is None:
+        with open("static/index.html", encoding="utf-8") as f:
+            html = f.read()
+        v = quote(LAST_UPDATED, safe="")
+        html = html.replace('href="/static/style.css"', f'href="/static/style.css?v={v}"')
+        html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={v}"')
+        _INDEX_HTML_CACHE = html
+    return _INDEX_HTML_CACHE
+
+
 @app.get("/")
-def root():
-    # Phase 2でstatic/index.htmlが揃い次第、study-trackerと同じ
-    # StaticFiles mount + キャッシュ無効化付きHTML配信に切り替える
-    return {"app": "Drill", "status": "ok"}
+def index():
+    return HTMLResponse(content=_render_index_html(), headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse("static/manifest.json")
+
+
+@app.get("/service-worker.js")
+def service_worker():
+    return FileResponse("static/service-worker.js", headers={"Cache-Control": "no-cache"})

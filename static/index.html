@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Drill</title>
+<meta name="theme-color" content="#171923" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" href="/static/icon-192.png" />
+<link rel="apple-touch-icon" href="/static/icon-192.png" />
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="top-progress-bar" class="hidden"></div>
+  <div id="toast-banner"></div>
+
+  <header class="app-header">
+    <h1>Drill</h1>
+    <div class="streak-chip" id="header-streak">🔥 -</div>
+  </header>
+
+  <main id="app-main">
+
+    <!-- 今日 -->
+    <section id="tab-today" class="tab-panel active">
+      <div class="today-quota-card">
+        <div class="quota-number"><span id="quota-solved">-</span><span class="quota-sep">/</span><span id="quota-target">-</span></div>
+        <div class="quota-label">今日の目標</div>
+        <div class="quota-achieved hidden" id="quota-achieved-msg">今日の目標達成</div>
+      </div>
+      <div class="overdue-badge" id="overdue-badge"></div>
+      <div id="today-queue" class="problem-list"></div>
+      <div id="today-empty" class="empty-state hidden">今日の問題はありません。お疲れさま。</div>
+    </section>
+
+    <!-- 本棚 -->
+    <section id="tab-bookshelf" class="tab-panel">
+      <div class="bookshelf-toolbar">
+        <select id="book-select"></select>
+        <button id="open-onboarding-btn" class="link-btn">単元をまとめて評価</button>
+      </div>
+      <div id="bookshelf-tree"></div>
+    </section>
+
+    <!-- メモ -->
+    <section id="tab-notes" class="tab-panel">
+      <div class="notes-filters">
+        <select id="notes-book-filter"><option value="">すべての本</option></select>
+        <select id="notes-mistake-filter"><option value="">すべてのミスタイプ</option></select>
+        <input id="notes-q" type="search" placeholder="キーワード検索" />
+      </div>
+      <div id="notes-list" class="notes-list"></div>
+      <div id="notes-empty" class="empty-state hidden">まだ記録がありません。</div>
+    </section>
+
+    <!-- 統計 -->
+    <section id="tab-stats" class="tab-panel">
+      <div class="stats-card">
+        <div class="stats-streak"><span id="stats-streak-num">-</span> 日連続</div>
+      </div>
+      <div class="stats-card" id="stats-pace-card">
+        <p id="stats-pace-text">-</p>
+      </div>
+      <div id="stats-books" class="stats-books"></div>
+    </section>
+
+    <!-- 設定 -->
+    <section id="tab-settings" class="tab-panel">
+      <form id="settings-form" class="settings-form">
+        <label>1日の目標問題数
+          <input type="number" id="setting-daily-target" min="1" max="50" />
+        </label>
+        <label>目標日(一橋大学 受験想定)
+          <input type="date" id="setting-exam-date" />
+        </label>
+        <button type="submit">保存</button>
+      </form>
+      <button id="open-onboarding-btn-2" class="link-btn">単元をまとめて評価する画面を開く</button>
+      <p class="meta" id="settings-last-updated">最終更新: 確認中...</p>
+    </section>
+
+  </main>
+
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="tab-today">今日</button>
+    <button class="tab-btn" data-tab="tab-bookshelf">本棚</button>
+    <button class="tab-btn" data-tab="tab-notes">メモ</button>
+    <button class="tab-btn" data-tab="tab-stats">統計</button>
+    <button class="tab-btn" data-tab="tab-settings">設定</button>
+  </nav>
+
+  <!-- 初回セットアップ: 単元一括自己申告 -->
+  <div id="onboarding-overlay" class="overlay hidden">
+    <div class="overlay-inner">
+      <h2>単元をまとめて評価</h2>
+      <p class="overlay-desc">
+        テスト勉強などで既に何周かした問題があれば、単元ごとにまとめて自己申告できます。
+        「得意」な単元は復習の優先度を下げ、「苦手」な単元は早めに本物の評価で上書きされていきます。
+        個別の問題はあとから本棚タブでいつでも調整できます。
+      </p>
+      <div id="onboarding-list" class="onboarding-list"></div>
+      <div class="overlay-actions">
+        <button id="onboarding-close-btn">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 問題の評価・メモ入力 -->
+  <div id="rate-modal" class="overlay hidden">
+    <div class="overlay-inner">
+      <h2 id="rate-modal-title">問題を評価</h2>
+      <div class="rate-buttons" id="rate-modal-buttons"></div>
+      <div id="rate-modal-mistake" class="mistake-chips hidden"></div>
+      <textarea id="rate-modal-memo" placeholder="メモ(なぜ間違えたか、など。任意)"></textarea>
+      <div class="overlay-actions">
+        <button id="rate-modal-cancel">キャンセル</button>
+        <button id="rate-modal-submit">記録する</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

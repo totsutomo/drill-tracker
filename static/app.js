@@ -9,9 +9,26 @@ function switchTab(tabId) {
   if (tabId === "tab-bookshelf") loadBookshelf();
   if (tabId === "tab-notes") loadNotes();
   if (tabId === "tab-stats") loadStats();
-  if (tabId === "tab-settings") loadSettings();
 }
 tabButtons.forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
+
+// ---------- 設定ドロワー(下タブではなく、ヘッダーの歯車から横に出す) ----------
+
+const settingsDrawer = document.getElementById("settings-drawer");
+const settingsBackdrop = document.getElementById("settings-backdrop");
+
+function openSettingsDrawer() {
+  settingsDrawer.classList.add("open");
+  settingsBackdrop.classList.remove("hidden");
+  loadSettings();
+}
+function closeSettingsDrawer() {
+  settingsDrawer.classList.remove("open");
+  settingsBackdrop.classList.add("hidden");
+}
+document.getElementById("settings-btn").addEventListener("click", openSettingsDrawer);
+document.getElementById("settings-close").addEventListener("click", closeSettingsDrawer);
+settingsBackdrop.addEventListener("click", closeSettingsDrawer);
 
 // ---------- progress bar / toast (study-trackerと同じ仕組み) ----------
 
@@ -421,22 +438,29 @@ function renderCatalog(book) {
 }
 
 function renderBookshelfRow(problem, book) {
+  const wrap = document.createElement("div");
+  wrap.className = "problem-row-wrap";
+
   const row = document.createElement("div");
   row.className = "problem-row" + (problem.retired_at ? " retired" : "");
   row.dataset.problemId = problem.id;
 
+  const historyPanel = document.createElement("div");
+  historyPanel.className = "problem-history hidden";
+
   const info = document.createElement("div");
-  info.className = "problem-info";
+  info.className = "problem-info tappable";
   const num = document.createElement("div");
   num.className = "p-num";
   num.textContent = `#${problem.number}`;
   const meta = document.createElement("div");
   meta.className = "p-meta";
   meta.textContent = problem.srs_last_rating
-    ? `評価${problem.srs_last_rating} / 次回 ${problem.srs_next_due_date}${problem.srs_graduated ? " / 卒業" : ""}`
+    ? `評価${problem.srs_last_rating} / 次回 ${problem.srs_next_due_date}${problem.srs_graduated ? " / 卒業" : ""}(タップで履歴)`
     : "未着手";
   info.appendChild(num);
   info.appendChild(meta);
+  info.addEventListener("click", () => toggleProblemHistory(problem.id, historyPanel));
 
   const namedProblem = { ...problem, book_title: book.title };
 
@@ -472,7 +496,64 @@ function renderBookshelfRow(problem, book) {
   row.appendChild(memoBtn);
   row.appendChild(btnWrap);
   row.appendChild(retireBtn);
-  return row;
+  wrap.appendChild(row);
+  wrap.appendChild(historyPanel);
+  return wrap;
+}
+
+// 問題ごとの過去の評価履歴(見る/wrong tapを取り消す用)。
+// 新規PUT/編集APIは作らず、既存のGET /api/problems/{id}(attempts同梱)とDELETE /api/attempts/{id}
+// (削除するとサーバー側でSRS状態を自動再計算する、main.pyのrecompute_problem_srs)を再利用する。
+// 間違った評価を付けた場合は、該当行を削除してから正しい評価ボタンを押し直す運用にする。
+async function toggleProblemHistory(problemId, panelEl) {
+  if (!panelEl.classList.contains("hidden")) {
+    panelEl.classList.add("hidden");
+    return;
+  }
+  panelEl.classList.remove("hidden");
+  panelEl.innerHTML = "<p class='meta'>読み込み中...</p>";
+  const detail = await api(`/api/problems/${problemId}`);
+  renderProblemHistory(panelEl, detail);
+}
+
+function renderProblemHistory(panelEl, detail) {
+  panelEl.innerHTML = "";
+  const attempts = (detail.attempts || []).slice().reverse(); // 新しい順に表示
+  if (attempts.length === 0) {
+    panelEl.innerHTML = "<p class='meta'>まだ記録がありません。</p>";
+    return;
+  }
+  attempts.forEach((a) => {
+    const row = document.createElement("div");
+    row.className = "history-row";
+    const badge = document.createElement("span");
+    badge.className = "history-badge";
+    badge.style.background = `var(--rate-${a.rating})`;
+    badge.textContent = a.rating;
+    const text = document.createElement("span");
+    text.className = "history-text";
+    const bits = [a.local_date];
+    if (a.source === "seed") bits.push("自己申告");
+    if (a.source === "import") bits.push("移行データ");
+    if (a.mistake_type) bits.push(a.mistake_type);
+    if (a.memo) bits.push(a.memo);
+    text.textContent = bits.join(" ・ ");
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "note-delete-btn";
+    delBtn.setAttribute("aria-label", "この記録を削除");
+    delBtn.textContent = "🗑";
+    delBtn.addEventListener("click", async () => {
+      if (!confirm("この記録を削除しますか?間違えて付けた評価を取り消す場合はここから削除できます。")) return;
+      await api(`/api/attempts/${a.id}`, { method: "DELETE" }).catch(() => showToast("削除に失敗しました"));
+      delete state.catalogCache[state.currentBookId];
+      renderBookshelfBook(state.currentBookId);
+    });
+    row.appendChild(badge);
+    row.appendChild(text);
+    row.appendChild(delBtn);
+    panelEl.appendChild(row);
+  });
 }
 
 async function toggleRetire(problemId) {
@@ -536,12 +617,22 @@ async function fetchAndRenderNotes() {
 function renderNoteCard(note) {
   const card = document.createElement("div");
   card.className = "note-card";
+  const header = document.createElement("div");
+  header.className = "note-card-header";
   const meta = document.createElement("div");
   meta.className = "note-meta";
   const parts = [note.noted_at];
   if (note.book_title) parts.push(`${note.book_title} #${note.problem_number}`);
   if (note.unit_name) parts.push(note.unit_name);
   meta.textContent = parts.join(" ・ ");
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "note-delete-btn";
+  delBtn.setAttribute("aria-label", "削除");
+  delBtn.textContent = "🗑";
+  delBtn.addEventListener("click", () => deleteNote(note, card));
+  header.appendChild(meta);
+  header.appendChild(delBtn);
   const summary = document.createElement("div");
   summary.className = "note-summary";
   if (note.mistake_type) {
@@ -551,9 +642,22 @@ function renderNoteCard(note) {
     summary.appendChild(tag);
   }
   summary.appendChild(document.createTextNode(note.summary));
-  card.appendChild(meta);
+  card.appendChild(header);
   card.appendChild(summary);
   return card;
+}
+
+async function deleteNote(note, cardEl) {
+  if (!confirm("このメモを削除しますか?")) return;
+  // note.kind === "standalone" は質問ログ由来のメモ(/api/notesで削除)、
+  // "attempt" は問題評価に紐づくメモ(削除するとattempt自体を取り消し、SRS状態も再計算される)
+  const url = note.kind === "attempt" ? `/api/attempts/${note.id}` : `/api/notes/${note.id}`;
+  try {
+    await api(url, { method: "DELETE" });
+    cardEl.remove();
+  } catch (err) {
+    showToast("削除に失敗しました");
+  }
 }
 
 // ---------- 統計タブ ----------

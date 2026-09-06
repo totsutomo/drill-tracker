@@ -510,9 +510,12 @@ function renderBookshelfRow(problem, book) {
   retireBtn.textContent = problem.retired_at ? "解除" : "もう出さない";
   retireBtn.addEventListener("click", () => toggleRetire(problem.id));
 
+  // 並び順: 情報→評価(最頻出)→メモ→もう出さない(最後、かつCSS側で1段余白を空けて誤タップを防ぐ)。
+  // 以前はメモボタンが評価ボタンより前にあり、今日タブ(情報→評価→メモ)と順序が食い違って
+  // 指の動きが画面ごとに変わっていたため統一した(2026-09-07)
   row.appendChild(info);
-  row.appendChild(memoBtn);
   row.appendChild(btnWrap);
+  row.appendChild(memoBtn);
   row.appendChild(retireBtn);
   wrap.appendChild(row);
   wrap.appendChild(historyPanel);
@@ -947,6 +950,57 @@ document.getElementById("onboarding-close-btn").addEventListener("click", () => 
   localStorage.setItem("drill_onboarding_seen", "1");
   Object.keys(state.catalogCache).forEach((k) => delete state.catalogCache[k]);
   loadToday();
+});
+
+// ---------- PC用キーボードショートカット ----------
+// スマホでは指でタップするので無関係。PCで開いた時に、評価ボタンを一つずつマウスで
+// 狙わなくても数字キーだけでキューを消化できるようにする(今日タブが主な対象)。
+// input/textarea/select にフォーカスがある間は横取りしない(検索欄への"1"入力等を壊さないため)。
+
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+}
+
+document.addEventListener("keydown", (e) => {
+  if (isTypingTarget(e.target)) return;
+
+  // 評価モーダルが開いている間: 1-5で評価選択、Enterで記録、Escでキャンセル
+  const rateModal = document.getElementById("rate-modal");
+  if (!rateModal.classList.contains("hidden")) {
+    if (e.key >= "1" && e.key <= "5") {
+      selectRateModalRating(Number(e.key));
+    } else if (e.key === "Enter") {
+      document.getElementById("rate-modal-submit").click();
+    } else if (e.key === "Escape") {
+      document.getElementById("rate-modal-cancel").click();
+    }
+    return;
+  }
+
+  // 設定ドロワーが開いている間: Escで閉じる
+  if (settingsDrawer.classList.contains("open")) {
+    if (e.key === "Escape") closeSettingsDrawer();
+    return;
+  }
+
+  // 今日タブ表示中: 1-5でキュー先頭の問題を即評価(メモなし)、Mでメモ付き評価モーダルを開く
+  if (document.getElementById("tab-today").classList.contains("active")) {
+    const firstRow = document.querySelector("#today-queue .problem-row:not(.done)");
+    if (!firstRow) return;
+    const problem = (state.today?.queue || []).find(
+      (p) => String(p.id) === firstRow.dataset.problemId
+    );
+    if (!problem) return;
+    if (e.key >= "1" && e.key <= "5") {
+      e.preventDefault();
+      rateTodayProblem(problem, Number(e.key), firstRow);
+    } else if (e.key === "m" || e.key === "M") {
+      e.preventDefault();
+      openRateModal(problem, { onDone: () => markTodayRowDone(firstRow) });
+    }
+  }
 });
 
 // ---------- 起動 ----------

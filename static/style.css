@@ -52,11 +52,14 @@ body {
 .streak-chip { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text-dim); }
 .streak-chip .streak-flame { width: 15px; height: 15px; color: var(--accent); flex-shrink: 0; }
 .icon-btn {
-  background: none; border: none; color: var(--text);
+  background: none; border: none; color: var(--text); border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;
-  line-height: 1; padding: 4px; cursor: pointer;
+  line-height: 1; padding: 8px; cursor: pointer; transition: transform .08s ease, background-color .12s ease;
 }
 .icon-btn svg { width: 20px; height: 20px; }
+/* 実際に押した時の手応え(タップ領域はpaddingで拡張済み、視覚サイズは20pxのまま) */
+.icon-btn:hover { background: var(--bg-elevated); }
+.icon-btn:active { transform: scale(0.92); }
 
 #app-main { padding: 12px 12px 24px; max-width: 640px; margin: 0 auto; }
 
@@ -87,6 +90,16 @@ body {
 .overdue-badge {
   color: var(--text-dim); font-size: 13px; margin: 4px 4px 12px;
 }
+/* PC用ショートカットのヒント。指で押すスマホでは意味がないため、マウス/トラックパッド等の
+   ポインティングデバイスがある環境(pointer:fine)だけに表示する(2026-09-07追加) */
+.kbd-hint { display: none; font-size: 11px; color: var(--text-dim); text-align: center; margin: 0 0 10px; }
+@media (pointer: fine) {
+  .kbd-hint { display: block; }
+}
+.kbd-hint kbd {
+  display: inline-block; background: var(--bg-elevated); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px; font-family: inherit; font-size: 11px; color: var(--text);
+}
 
 .problem-list { display: flex; flex-direction: column; gap: 8px; }
 .problem-row {
@@ -106,13 +119,17 @@ body {
 }
 .problem-info .p-num { font-weight: 600; font-size: 15px; }
 .problem-info .p-meta { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.rate-buttons-inline { display: flex; gap: 4px; flex-shrink: 0; }
+/* 5つの評価ボタンは1日に何十回もタップする主要操作のため、隣同士の誤タップを防ぐ間隔を
+   通常のボタン間隔(8px)よりやや広めに取る(2026-09-07調整) */
+.rate-buttons-inline { display: flex; gap: 6px; flex-shrink: 0; }
 
 .rate-btn {
-  width: 34px; height: 34px; border-radius: 50%; border: none; color: #fff;
+  width: 38px; height: 38px; border-radius: 50%; border: none; color: #fff;
   font-weight: 700; font-size: 14px; line-height: 1; cursor: pointer;
   display: flex; align-items: center; justify-content: center; padding: 0;
+  transition: transform .08s ease;
 }
+.rate-btn:active { transform: scale(0.9); }
 .rate-btn[data-rating="1"] { background: var(--rate-1); }
 .rate-btn[data-rating="2"] { background: var(--rate-2); }
 .rate-btn[data-rating="3"] { background: var(--rate-3); }
@@ -141,14 +158,17 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 .unit-header { font-size: 13px; color: var(--text-dim); margin-bottom: 4px; }
 .retire-btn {
   background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 6px;
-  font-size: 11px; padding: 4px 6px; cursor: pointer; flex-shrink: 0;
+  font-size: 11px; padding: 6px 8px; cursor: pointer; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
+  transition: transform .08s ease;
 }
+.retire-btn:active { transform: scale(0.94); }
 .retire-btn svg { width: 15px; height: 15px; }
 .retire-btn.active { color: var(--accent); border-color: var(--accent); }
 /* 本棚の実際の「もう出さない/解除」トグルはテキスト長が変わる(retire-btnはメモアイコンボタンと共用のため
-   ここだけ固定幅にして、評価ボタン列の位置がretired状態によって行間でズレないようにする) */
-.retire-toggle { min-width: 78px; text-align: center; }
+   ここだけ固定幅にして、評価ボタン列の位置がretired状態によって行間でズレないようにする)。
+   また評価ボタンのすぐ右に置くと「5」を押すつもりで誤タップしやすいため、余白を追加で1段広く取る(2026-09-07) */
+.retire-toggle { min-width: 78px; text-align: center; margin-left: 6px; }
 .problem-row.retired { opacity: 0.45; }
 .problem-info.tappable { cursor: pointer; }
 .problem-row-wrap { display: flex; flex-direction: column; gap: 0; }
@@ -181,10 +201,12 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 .note-delete-btn {
   background: none; border: none; color: var(--text-dim);
   display: inline-flex; align-items: center; justify-content: center;
-  line-height: 1; padding: 2px 4px; cursor: pointer; flex-shrink: 0;
+  line-height: 1; padding: 6px; cursor: pointer; flex-shrink: 0;
+  transition: transform .08s ease;
 }
 .note-delete-btn svg { width: 15px; height: 15px; }
 .note-delete-btn:hover { color: var(--bad); }
+.note-delete-btn:active { transform: scale(0.9); }
 .note-tag {
   display: inline-block; background: var(--accent-dim); color: var(--accent);
   border-radius: 6px; font-size: 11px; padding: 1px 6px; margin-right: 6px;

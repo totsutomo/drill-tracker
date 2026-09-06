@@ -214,10 +214,15 @@ def add_days(local_date: str, days: int) -> str:
     return (d + timedelta(days=days)).isoformat()
 
 
-def compute_next_srs_state(prior_streak: int, rating: int):
+def compute_next_srs_state(prior_streak: int, rating: int, source: str = "solve"):
     """評価1件を反映した後のstreak/graduated/次回までの日数を返す。
-    (新streak, 新graduated, 次回までの日数)"""
-    new_streak = prior_streak + 1 if rating >= 4 else 0
+    (新streak, 新graduated, 次回までの日数)
+    source='seed'(7.5章の単元一括自己申告)は実際に解いた確認ではないため、
+    rating>=4でも卒業ロジックのstreakには一切寄与させない。"""
+    if source == "seed":
+        new_streak = 0
+    else:
+        new_streak = prior_streak + 1 if rating >= 4 else 0
     new_graduated = 1 if new_streak >= 2 else 0
     interval = GRADUATED_INTERVAL_DAYS if new_graduated else INTERVAL_DAYS[rating]
     return new_streak, new_graduated, interval
@@ -228,7 +233,7 @@ def recompute_problem_srs(conn, problem_id: int):
     POST/DELETE /api/attempts、インポートスクリプトのいずれからも呼ばれる共通ロジック。
     (attempts=過去の記録、problems=現在の状態のキャッシュ、という2章の分離を守るための唯一の書き込み経路)"""
     cur = conn.execute(
-        "SELECT rating, local_date FROM attempts WHERE problem_id = ? "
+        "SELECT rating, local_date, source FROM attempts WHERE problem_id = ? "
         "ORDER BY local_date ASC, created_at ASC, id ASC",
         (problem_id,),
     )
@@ -243,8 +248,8 @@ def recompute_problem_srs(conn, problem_id: int):
 
     streak, graduated = 0, 0
     last_rating, next_due = None, None
-    for rating, local_date in rows:
-        streak, graduated, interval = compute_next_srs_state(streak, rating)
+    for rating, local_date, source in rows:
+        streak, graduated, interval = compute_next_srs_state(streak, rating, source)
         last_rating = rating
         next_due = add_days(local_date, interval)
 

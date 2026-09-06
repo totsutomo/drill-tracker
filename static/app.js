@@ -664,6 +664,8 @@ async function deleteNote(note, cardEl) {
 
 async function loadStats() {
   await loadWithCache(`/api/stats/overview?date=${todayStr()}`, renderStats);
+  await loadWithCache(`/api/stats/weakness?date=${todayStr()}`, renderWeakness);
+  await loadWithCache(`/api/stats/heatmap`, renderHeatmap);
 }
 
 function renderStats(data) {
@@ -694,6 +696,145 @@ function renderStats(data) {
     row.appendChild(title);
     row.appendChild(track);
     booksEl.appendChild(row);
+  });
+
+  renderDistribution(data.rating_distribution);
+  renderTrend(data.weekly_trend);
+}
+
+function renderDistribution(distribution) {
+  const el = document.getElementById("stats-distribution");
+  el.innerHTML = "";
+  if (!distribution) return;
+  const max = Math.max(1, ...Object.values(distribution));
+  for (const rating of [1, 2, 3, 4, 5]) {
+    const count = distribution[String(rating)] || 0;
+    const row = document.createElement("div");
+    row.className = "dist-row";
+    const label = document.createElement("span");
+    label.className = "dist-label";
+    label.textContent = rating;
+    const track = document.createElement("div");
+    track.className = "dist-track";
+    const fill = document.createElement("div");
+    fill.className = "dist-fill";
+    fill.style.width = `${(count / max) * 100}%`;
+    fill.style.background = `var(--rate-${rating})`;
+    track.appendChild(fill);
+    const num = document.createElement("span");
+    num.className = "dist-count";
+    num.textContent = count;
+    row.appendChild(label);
+    row.appendChild(track);
+    row.appendChild(num);
+    el.appendChild(row);
+  }
+}
+
+function renderTrend(weeklyTrend) {
+  const el = document.getElementById("stats-trend");
+  el.innerHTML = "";
+  if (!weeklyTrend || weeklyTrend.length === 0) return;
+  const w = 300, h = 80, pad = 10;
+  const stepX = (w - pad * 2) / (weeklyTrend.length - 1 || 1);
+  const yFor = (rating) => h - pad - ((rating - 1) / 4) * (h - pad * 2);
+  const points = weeklyTrend.map((wk, i) => {
+    const x = pad + i * stepX;
+    const y = wk.avg_rating != null ? yFor(wk.avg_rating) : null;
+    return { x, y, wk };
+  });
+  const withData = points.filter((p) => p.y != null);
+  let svg = `<svg viewBox="0 0 ${w} ${h}" class="trend-svg">`;
+  if (withData.length > 1) {
+    const line = withData.map((p) => `${p.x},${p.y}`).join(" ");
+    svg += `<polyline points="${line}" fill="none" stroke="var(--accent)" stroke-width="2" />`;
+  }
+  withData.forEach((p) => {
+    svg += `<circle cx="${p.x}" cy="${p.y}" r="3" fill="var(--accent)" />`;
+  });
+  svg += `</svg>`;
+  el.innerHTML = svg;
+  const labels = document.createElement("div");
+  labels.className = "trend-labels";
+  weeklyTrend.forEach((wk) => {
+    const span = document.createElement("span");
+    span.textContent = wk.week_start.slice(5); // "MM-DD"
+    labels.appendChild(span);
+  });
+  el.appendChild(labels);
+}
+
+function renderWeakness(data) {
+  const breakdownEl = document.getElementById("stats-mistake-breakdown");
+  const emptyEl = document.getElementById("stats-weakness-empty");
+  const weakUnitsEl = document.getElementById("stats-weak-units");
+  breakdownEl.innerHTML = "";
+  weakUnitsEl.innerHTML = "";
+
+  const breakdown = data.mistake_breakdown || [];
+  emptyEl.classList.toggle("hidden", breakdown.length > 0);
+  const max = Math.max(1, ...breakdown.map((m) => m.count));
+  breakdown.forEach((m) => {
+    const row = document.createElement("div");
+    row.className = "dist-row";
+    const label = document.createElement("span");
+    label.className = "dist-label mistake-label";
+    label.textContent = m.mistake_type;
+    const track = document.createElement("div");
+    track.className = "dist-track";
+    const fill = document.createElement("div");
+    fill.className = "dist-fill";
+    fill.style.width = `${(m.count / max) * 100}%`;
+    fill.style.background = "var(--rate-2)";
+    track.appendChild(fill);
+    const num = document.createElement("span");
+    num.className = "dist-count";
+    num.textContent = m.count;
+    row.appendChild(label);
+    row.appendChild(track);
+    row.appendChild(num);
+    breakdownEl.appendChild(row);
+  });
+
+  const weakUnits = data.weak_units || [];
+  if (weakUnits.length === 0) {
+    weakUnitsEl.innerHTML = "<p class='meta'>該当する単元はありません。</p>";
+  }
+  weakUnits.forEach((u) => {
+    const row = document.createElement("div");
+    row.className = "weak-unit-row";
+    row.innerHTML =
+      `<div><strong>${u.unit_name}</strong><span class="meta">${u.book_title} ${u.chapter_name}</span></div>` +
+      `<div class="weak-unit-badge">低評価${u.low_rating_count}件 平均${u.avg_rating}</div>`;
+    weakUnitsEl.appendChild(row);
+  });
+}
+
+function heatmapColor(unit) {
+  if (!unit.attempted) return "var(--bg-elevated)";
+  if (unit.avg_rating >= 4) return "var(--rate-5)";
+  if (unit.avg_rating >= 2.5) return "var(--rate-3)";
+  return "var(--rate-1)";
+}
+
+function renderHeatmap(data) {
+  const el = document.getElementById("stats-heatmap");
+  el.innerHTML = "";
+  let currentBook = null;
+  (data.units || []).forEach((u) => {
+    if (u.book_title !== currentBook) {
+      currentBook = u.book_title;
+      const heading = document.createElement("div");
+      heading.className = "heatmap-book-heading";
+      heading.textContent = currentBook;
+      el.appendChild(heading);
+    }
+    const cell = document.createElement("div");
+    cell.className = "heatmap-cell";
+    cell.style.background = heatmapColor(u);
+    cell.title = `${u.chapter_name} ${u.unit_name}(${u.attempted}/${u.total}問、平均${u.avg_rating ?? "-"})`;
+    cell.textContent = u.unit_name;
+    el.appendChild(cell);
   });
 }
 

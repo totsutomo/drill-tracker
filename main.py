@@ -550,6 +550,28 @@ def stats_overview(date: str):
         if days_left > 0:
             pace_per_day = round(unattempted_total / days_left, 1)
 
+    # 評価分布(Phase2): 現在のproblems.srs_last_ratingの分布。1度も解いていない問題は含めない
+    dist_rows = conn.execute(
+        "SELECT srs_last_rating, COUNT(*) FROM problems WHERE srs_last_rating IS NOT NULL GROUP BY srs_last_rating"
+    ).fetchall()
+    dist_map = {r[0]: r[1] for r in dist_rows}
+    rating_distribution = {str(r): dist_map.get(r, 0) for r in (1, 2, 3, 4, 5)}
+
+    # 正答率推移(Phase2): dateを含む週から遡って8週分。実際に解いた記録(source='solve')のみ集計
+    weekly_trend = []
+    for i in range(7, -1, -1):
+        week_start = add_days(date, -7 * i)
+        week_end = add_days(week_start, 6)
+        cnt, avg = conn.execute(
+            "SELECT COUNT(*), AVG(rating) FROM attempts WHERE source = 'solve' AND local_date BETWEEN ? AND ?",
+            (week_start, week_end),
+        ).fetchone()
+        weekly_trend.append({
+            "week_start": week_start,
+            "count": cnt,
+            "avg_rating": round(avg, 2) if avg is not None else None,
+        })
+
     conn.close()
     return {
         "streak_days": streak,
@@ -558,7 +580,78 @@ def stats_overview(date: str):
         "days_left": days_left,
         "unattempted_total": unattempted_total,
         "pace_per_day": pace_per_day,
+        "rating_distribution": rating_distribution,
+        "weekly_trend": weekly_trend,
     }
+
+
+@app.get("/api/stats/weakness")
+def stats_weakness(date: str, days: int = 30):
+    """ミスタイプ別頻度・要注意単元(実装プラン5章のPhase2項目)。
+    直近days日分のsource='solve'記録のみを対象にする(古いimport/seedデータで
+    今の弱点像が歪まないようにするため)。"""
+    conn = get_connection()
+    since = add_days(date, -days)
+
+    mistake_breakdown = rows_to_dicts(
+        conn.execute(
+            "SELECT mistake_type, COUNT(*) AS count FROM attempts "
+            "WHERE source = 'solve' AND mistake_type IS NOT NULL AND mistake_type != '' "
+            "AND local_date >= ? GROUP BY mistake_type ORDER BY count DESC",
+            (since,),
+        )
+    )
+
+    weak_units = rows_to_dicts(
+        conn.execute(
+            """
+            SELECT u.id AS unit_id, u.name AS unit_name, c.name AS chapter_name, b.title AS book_title,
+                   COUNT(*) AS low_rating_count, ROUND(AVG(a.rating), 2) AS avg_rating
+            FROM attempts a
+            JOIN problems p ON a.problem_id = p.id
+            JOIN units u ON p.unit_id = u.id
+            JOIN chapters c ON u.chapter_id = c.id
+            JOIN sections se ON c.section_id = se.id
+            JOIN books b ON se.book_id = b.id
+            WHERE a.source = 'solve' AND a.rating <= 2 AND a.local_date >= ?
+            GROUP BY u.id
+            ORDER BY low_rating_count DESC, avg_rating ASC
+            LIMIT 5
+            """,
+            (since,),
+        )
+    )
+    conn.close()
+    return {"since": since, "mistake_breakdown": mistake_breakdown, "weak_units": weak_units}
+
+
+@app.get("/api/stats/heatmap")
+def stats_heatmap():
+    """単元別ヒートマップ(実装プラン5章のPhase2項目)。旧Obsidianダッシュボードの
+    緑(得意)/橙(普通)/赤(苦手)の色分けを踏襲し、色判定自体はフロント側に任せる
+    (avg_ratingを返すだけにして、閾値変更の際にAPIを叩き直さなくて済むようにする)。"""
+    conn = get_connection()
+    units = rows_to_dicts(
+        conn.execute(
+            """
+            SELECT u.id AS unit_id, u.name AS unit_name, c.name AS chapter_name, b.title AS book_title,
+                   b.sort_order AS book_sort, se.sort_order AS section_sort, c.sort_order AS chapter_sort,
+                   u.sort_order AS unit_sort,
+                   COUNT(p.id) AS total,
+                   SUM(CASE WHEN p.srs_last_rating IS NOT NULL THEN 1 ELSE 0 END) AS attempted,
+                   ROUND(AVG(CASE WHEN p.srs_last_rating IS NOT NULL THEN p.srs_last_rating END), 2) AS avg_rating
+            FROM units u
+            JOIN chapters c ON u.chapter_id = c.id
+            JOIN sections se ON c.section_id = se.id
+            JOIN books b ON se.book_id = b.id
+            LEFT JOIN problems p ON p.unit_id = u.id
+            GROUP BY u.id
+            ORDER BY book_sort, section_sort, chapter_sort, unit_sort, u.id
+            """
+        )
+    )
+    conn.close()
+    return {"units": units}
 
 
 # ---------- 設定 ----------

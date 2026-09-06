@@ -488,7 +488,7 @@ function renderBookshelfRow(problem, book) {
   );
 
   const retireBtn = document.createElement("button");
-  retireBtn.className = "retire-btn" + (problem.retired_at ? " active" : "");
+  retireBtn.className = "retire-btn retire-toggle" + (problem.retired_at ? " active" : "");
   retireBtn.textContent = problem.retired_at ? "解除" : "もう出さない";
   retireBtn.addEventListener("click", () => toggleRetire(problem.id));
 

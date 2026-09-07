@@ -191,6 +191,10 @@ const state = {
   currentBookId: null,
 };
 
+// 本棚タブで開いている章(chapter.id)を覚えておく。renderCatalog()は評価のたびに
+// ツリーを丸ごと作り直すため、これが無いと開いていた章が毎回閉じた状態に戻ってしまう(2026-09-07発覚)。
+const expandedChapterIds = new Set();
+
 // ---------- 共通: attempt送信 ----------
 
 async function submitAttempt(problem, rating, { memo = null, mistakeType = null } = {}) {
@@ -403,9 +407,14 @@ async function loadBookshelf() {
 }
 
 async function renderBookshelfBook(bookId) {
+  const isBookSwitch = state.currentBookId !== bookId;
   state.currentBookId = bookId;
-  const tree = document.getElementById("bookshelf-tree");
-  tree.innerHTML = "<p class='meta'>読み込み中...</p>";
+  // 本の切り替え時だけ「読み込み中」を出す。評価・メモ・もう出さない等の操作後に呼ばれる
+  // 再描画では、ここでツリーを空にしてしまうと開いていた章の表示も一瞬消えてガタつくため出さない
+  // (renderCatalogがexpandedChapterIdsを見て復元するとはいえ、消してから作り直す動き自体が目障りだった)。
+  if (isBookSwitch) {
+    document.getElementById("bookshelf-tree").innerHTML = "<p class='meta'>読み込み中...</p>";
+  }
   await loadWithCache(`/api/books/${bookId}/catalog`, (data) => {
     state.catalogCache[bookId] = data;
     if (state.currentBookId === bookId) renderCatalog(data);
@@ -425,11 +434,15 @@ function renderCatalog(book) {
 
     (section.chapters || []).forEach((chapter) => {
       const block = document.createElement("div");
-      block.className = "chapter-block";
+      block.className = "chapter-block" + (expandedChapterIds.has(chapter.id) ? " expanded" : "");
       const header = document.createElement("div");
       header.className = "chapter-header";
       header.textContent = `第${chapter.number}章 ${chapter.name}`;
-      header.addEventListener("click", () => block.classList.toggle("expanded"));
+      header.addEventListener("click", () => {
+        const nowExpanded = block.classList.toggle("expanded");
+        if (nowExpanded) expandedChapterIds.add(chapter.id);
+        else expandedChapterIds.delete(chapter.id);
+      });
       const body = document.createElement("div");
       body.className = "chapter-body";
 
@@ -491,8 +504,18 @@ function renderBookshelfRow(problem, book) {
     btn.textContent = String(r);
     btn.title = RATING_LABELS[r];
     // Todayタブと同じく、番号ボタンは1タップでそのまま記録する(メモなし)
+    // 次回due日はサーバー側のSRS計算に依存するため、Todayタブのような完全な楽観的更新(先に見た目を確定させる)は
+    // できないが、送信中であることだけは即座に見せて「押した感」を出す
     btn.addEventListener("click", async () => {
-      await submitAttempt(namedProblem, r).catch(() => showToast("保存に失敗しました。もう一度お試しください"));
+      const prevMeta = meta.textContent;
+      meta.textContent = "記録中...";
+      try {
+        await submitAttempt(namedProblem, r);
+      } catch (err) {
+        meta.textContent = prevMeta;
+        showToast("保存に失敗しました。もう一度お試しください");
+        return;
+      }
       renderBookshelfBook(state.currentBookId);
     });
     btnWrap.appendChild(btn);
@@ -1021,16 +1044,19 @@ async function init() {
 // PC/スマホ間で使うため、他端末での評価結果をタブ復帰時に反映する
 // (vocab-appの教訓: pushだけでは同期にならない、受信側にもpullの起点が要る。
 // ただしDrillはvocab-appのような常時ポーリングは行わず、イベント起点のみに留める)
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") {
-    loadToday();
-    if (document.getElementById("tab-stats").classList.contains("active")) loadStats();
-  }
-});
-window.addEventListener("online", () => {
+// 2026-09-07: 本棚タブがこの起点から漏れていて、開いたまま他端末で評価しても
+// タブ復帰時に反映されないバグがあったため追加(今日タブ・統計タブは元から対象済み)。
+function refreshActiveTab() {
   loadToday();
   if (document.getElementById("tab-stats").classList.contains("active")) loadStats();
+  if (document.getElementById("tab-bookshelf").classList.contains("active") && state.currentBookId) {
+    renderBookshelfBook(state.currentBookId);
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshActiveTab();
 });
+window.addEventListener("online", refreshActiveTab);
 
 init();
 

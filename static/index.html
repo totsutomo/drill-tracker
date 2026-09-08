@@ -44,6 +44,14 @@
       <p class="kbd-hint"><kbd>1</kbd>〜<kbd>5</kbd> 一番上の問題を評価 / <kbd>M</kbd> メモ付きで評価</p>
       <div id="today-queue" class="problem-list"></div>
       <div id="today-empty" class="empty-state hidden">今日の問題はありません。お疲れさま。</div>
+
+      <div id="today-done-section" class="today-done-section hidden">
+        <button type="button" id="today-done-toggle" class="today-done-toggle">
+          <span>済み (<span id="today-done-count">0</span>)</span>
+          <span class="today-done-chevron">▸</span>
+        </button>
+        <div id="today-done-list" class="problem-list hidden"></div>
+      </div>
     </section>
 
     <!-- 本棚 -->

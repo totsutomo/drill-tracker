@@ -282,6 +282,24 @@ def create_attempt(payload: AttemptIn):
     return result
 
 
+class AttemptMemoUpdateIn(BaseModel):
+    memo: str
+
+
+@app.put("/api/attempts/{attempt_id}/memo")
+def update_attempt_memo(attempt_id: int, payload: AttemptMemoUpdateIn):
+    """メモタブでのメモ編集用(2026-09-08追加)。評価(rating)やSRS状態には触れない。"""
+    conn = get_connection()
+    row = conn.execute("SELECT id FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+    if row is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="attempt not found")
+    conn.execute("UPDATE attempts SET memo = ? WHERE id = ?", (payload.memo, attempt_id))
+    conn.commit()
+    conn.close()
+    return {"updated": True}
+
+
 @app.delete("/api/attempts/{attempt_id}")
 def delete_attempt(attempt_id: int):
     conn = get_connection()
@@ -329,8 +347,9 @@ def queue_today(date: str):
     ).fetchone()[0]
 
     overdue_total = conn.execute(
-        "SELECT COUNT(*) FROM problems WHERE retired_at IS NULL "
-        "AND srs_next_due_date IS NOT NULL AND srs_next_due_date <= ?",
+        "SELECT COUNT(*) FROM problems p JOIN sections s ON p.section_id = s.id "
+        "WHERE p.retired_at IS NULL AND s.name != 'EXERCISE' "
+        "AND p.srs_next_due_date IS NOT NULL AND p.srs_next_due_date <= ?",
         (date,),
     ).fetchone()[0]
 
@@ -345,10 +364,12 @@ def queue_today(date: str):
         "JOIN chapters c ON u.chapter_id = c.id"
     )
 
+    # 2026-09-08: とりあえずEXERCISEセクションは今日の出題対象から除外(とっつー要望)。
+    # 恒久的に外すのか設定で切り替えたいのかは未確定なので、いったんハードコードで絞る。
     review_queue = rows_to_dicts(
         conn.execute(
             f"SELECT {problem_display_cols} FROM problems p {problem_display_joins} "
-            "WHERE p.retired_at IS NULL "
+            "WHERE p.retired_at IS NULL AND s.name != 'EXERCISE' "
             "AND p.srs_next_due_date IS NOT NULL AND p.srs_next_due_date <= ? "
             "ORDER BY p.srs_last_rating ASC, p.srs_next_due_date ASC, p.catalog_order ASC "
             "LIMIT ?",
@@ -363,13 +384,26 @@ def queue_today(date: str):
         new_queue = rows_to_dicts(
             conn.execute(
                 f"SELECT {problem_display_cols} FROM problems p {problem_display_joins} "
-                "WHERE p.retired_at IS NULL "
+                "WHERE p.retired_at IS NULL AND s.name != 'EXERCISE' "
                 "AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.problem_id = p.id) "
                 "ORDER BY p.catalog_order ASC LIMIT ?",
                 (remaining,),
             )
         )
         queue.extend(new_queue)
+
+    # 今日すでに解いた問題(evaluation付き)。キューから消すのではなく「済み」として
+    # 別グループで見せ続けるための一覧(2026-09-08、とっつー要望: 消すとモチベが下がる)。
+    done_today = rows_to_dicts(
+        conn.execute(
+            f"SELECT a.id AS attempt_id, a.rating AS rating, a.memo AS memo, "
+            f"a.mistake_type AS mistake_type, a.created_at AS created_at, {problem_display_cols} "
+            f"FROM attempts a JOIN problems p ON a.problem_id = p.id {problem_display_joins} "
+            "WHERE a.source = 'solve' AND a.local_date = ? "
+            "ORDER BY a.created_at DESC, a.id DESC",
+            (date,),
+        )
+    )
 
     conn.close()
     return {
@@ -380,6 +414,7 @@ def queue_today(date: str):
         "review_count": len(review_queue),
         "new_count": len(new_queue),
         "queue": queue,
+        "done_today": done_today,
     }
 
 
@@ -493,6 +528,23 @@ def create_note(payload: NoteIn):
     new_id = cur.lastrowid
     conn.close()
     return {"id": new_id}
+
+
+class NoteUpdateIn(BaseModel):
+    summary: str
+
+
+@app.put("/api/notes/{note_id}")
+def update_note(note_id: int, payload: NoteUpdateIn):
+    conn = get_connection()
+    row = conn.execute("SELECT id FROM standalone_notes WHERE id = ?", (note_id,)).fetchone()
+    if row is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="note not found")
+    conn.execute("UPDATE standalone_notes SET summary = ? WHERE id = ?", (payload.summary, note_id))
+    conn.commit()
+    conn.close()
+    return {"updated": True}
 
 
 @app.delete("/api/notes/{note_id}")

@@ -232,6 +232,16 @@ function renderToday() {
   list.innerHTML = "";
   document.getElementById("today-empty").classList.toggle("hidden", data.queue.length > 0);
   data.queue.forEach((p) => list.appendChild(renderTodayRow(p)));
+
+  renderTodayDoneSection();
+}
+
+// 今日タブの行を問題idから探す。「メモを書いている間に他端末の更新でリスト全体が
+// 作り直された」等でDOM要素の参照だけを覚えておくと、あとで動かそうとした時には
+// 既に消えたノードを触ることになり画面に反映されない不具合があったため(2026-09-08発覚)、
+// row要素は保存せず、操作する瞬間に毎回IDで引き直す方式にした。
+function getTodayRowEl(problemId) {
+  return document.querySelector(`#today-queue .problem-row[data-problem-id="${problemId}"]`);
 }
 
 function renderTodayRow(problem) {
@@ -258,14 +268,14 @@ function renderTodayRow(problem) {
     btn.dataset.rating = String(r);
     btn.textContent = String(r);
     btn.title = RATING_LABELS[r];
-    btn.addEventListener("click", () => rateTodayProblem(problem, r, row));
+    btn.addEventListener("click", () => rateTodayProblem(problem, r));
     btnWrap.appendChild(btn);
   }
   const memoBtn = document.createElement("button");
   memoBtn.className = "retire-btn";
   memoBtn.innerHTML = ICON_PENCIL;
   memoBtn.title = "メモを付けて記録";
-  memoBtn.addEventListener("click", () => openRateModal(problem, { onDone: () => markTodayRowDone(row) }));
+  memoBtn.addEventListener("click", () => openRateModal(problem, { onSubmit: submitTodayFromModal }));
 
   row.appendChild(info);
   row.appendChild(btnWrap);
@@ -273,27 +283,51 @@ function renderTodayRow(problem) {
   return row;
 }
 
-function markTodayRowDone(row) {
-  row.classList.add("done");
-  setTimeout(() => row.remove(), 250);
-}
-
-async function rateTodayProblem(problem, rating, row) {
+// 今日タブでの評価送信の共通処理(番号ボタンの即時評価・メモ付きモーダルの両方から呼ぶ)。
+// 「やった問題」はリストから消すのではなく、下の済みセクションへ動かして評価バッジ付きで残す
+// (2026-09-08、とっつー要望: 消えるとモチベが下がる/今日何をどう評価したか後から見えない)。
+// DOM操作は必ずこの関数の中で「送信前」に同期的に行う(=optimistic)。
+// awaitの後まで特定のrow要素への参照を持ち越さないことが、上のgetTodayRowEl注記のバグ修正の要。
+async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = null } = {}) {
+  let ok = true;
   await optimistic(
     () => {
-      markTodayRowDone(row);
-      if (state.today) {
-        state.today.solved_today++;
-        renderQuotaOnly();
-      }
+      const rowEl = getTodayRowEl(problem.id);
+      if (rowEl) rowEl.remove();
+      if (!state.today) return;
+      state.today.queue = state.today.queue.filter((p) => p.id !== problem.id);
+      state.today.solved_today++;
+      state.today.done_today = [
+        {
+          ...problem,
+          rating,
+          memo,
+          mistake_type: mistakeType,
+          created_at: new Date().toISOString(),
+        },
+        ...(state.today.done_today || []),
+      ];
+      renderQuotaOnly();
+      renderTodayDoneSection();
+      document.getElementById("today-empty").classList.toggle("hidden", state.today.queue.length > 0);
     },
     () => {
-      row.classList.remove("done");
-      if (state.today) state.today.solved_today = Math.max(0, state.today.solved_today - 1);
-      renderQuotaOnly();
+      // 失敗時はローカルの見込みを信用せず、サーバーの状態を取り直して確実に整合させる
+      ok = false;
+      loadToday();
     },
-    () => submitAttempt(problem, rating)
-  );
+    () => submitAttempt(problem, rating, { memo, mistakeType })
+  ).catch(() => {});
+  return ok;
+}
+
+async function rateTodayProblem(problem, rating) {
+  await recordTodayAttempt(problem, rating);
+}
+
+async function submitTodayFromModal(problem, rating, opts) {
+  const ok = await recordTodayAttempt(problem, rating, opts);
+  if (ok) showToast("記録しました");
 }
 
 function renderQuotaOnly() {
@@ -305,12 +339,65 @@ function renderQuotaOnly() {
   );
 }
 
+// ---------- 今日タブ: 済みセクション(スクショのDONE/SKIPPEDグループ表示を参考に) ----------
+
+let todayDoneExpanded = false;
+
+function renderTodayDoneSection() {
+  const doneToday = (state.today && state.today.done_today) || [];
+  const section = document.getElementById("today-done-section");
+  section.classList.toggle("hidden", doneToday.length === 0);
+  document.getElementById("today-done-count").textContent = doneToday.length;
+  const list = document.getElementById("today-done-list");
+  list.innerHTML = "";
+  doneToday.forEach((a) => list.appendChild(renderTodayDoneRow(a)));
+  list.classList.toggle("hidden", !todayDoneExpanded);
+  document.getElementById("today-done-toggle").classList.toggle("expanded", todayDoneExpanded);
+}
+
+function renderTodayDoneRow(a) {
+  const row = document.createElement("div");
+  row.className = "problem-row today-done-row";
+
+  const info = document.createElement("div");
+  info.className = "problem-info";
+  const num = document.createElement("div");
+  num.className = "p-num";
+  num.textContent = `${a.book_title || ""} ${a.section_name || ""} #${a.number}`;
+  const meta = document.createElement("div");
+  meta.className = "p-meta";
+  const bits = [a.unit_name || ""];
+  if (a.mistake_type) bits.push(a.mistake_type);
+  if (a.memo) bits.push(a.memo);
+  meta.textContent = bits.filter(Boolean).join(" ・ ");
+  info.appendChild(num);
+  info.appendChild(meta);
+
+  const badge = document.createElement("span");
+  badge.className = "history-badge today-done-badge";
+  badge.style.background = `var(--rate-${a.rating})`;
+  badge.title = RATING_LABELS[a.rating] || "";
+  badge.textContent = a.rating;
+
+  row.appendChild(info);
+  row.appendChild(badge);
+  return row;
+}
+
+document.getElementById("today-done-toggle").addEventListener("click", () => {
+  todayDoneExpanded = !todayDoneExpanded;
+  renderTodayDoneSection();
+});
+
 // ---------- 評価モーダル(本棚・今日タブの📝から共通利用) ----------
 
 let rateModalCtx = null;
 
-function openRateModal(problem, { onDone } = {}) {
-  rateModalCtx = { problem, onDone, rating: null, mistakeType: null };
+// onSubmit(problem, rating, {memo, mistakeType}) が送信・UI反映・トーストまで一手に引き受ける。
+// 今日タブ/本棚タブでモーダル後にやることが違う(今日タブ=済みセクションへ移動、
+// 本棚タブ=ツリー再描画)ため、呼び出し側から丸ごと差し替えられるようにしている。
+function openRateModal(problem, { onSubmit } = {}) {
+  rateModalCtx = { problem, onSubmit, rating: null, mistakeType: null };
   document.getElementById("rate-modal-title").textContent =
     `${problem.book_title || ""} #${problem.number} を評価`;
   const btnWrap = document.getElementById("rate-modal-buttons");
@@ -363,17 +450,11 @@ document.getElementById("rate-modal-submit").addEventListener("click", async () 
     showToast("評価を選んでください");
     return;
   }
-  const { problem, rating, mistakeType, onDone } = rateModalCtx;
+  const { problem, rating, mistakeType, onSubmit } = rateModalCtx;
   const memo = document.getElementById("rate-modal-memo").value.trim() || null;
   document.getElementById("rate-modal").classList.add("hidden");
-  try {
-    await submitAttempt(problem, rating, { memo, mistakeType: rating <= 3 ? mistakeType : null });
-    if (onDone) onDone();
-    showToast("記録しました");
-  } catch (err) {
-    showToast("保存に失敗しました。もう一度お試しください");
-  }
   rateModalCtx = null;
+  await onSubmit(problem, rating, { memo, mistakeType: rating <= 3 ? mistakeType : null });
 });
 
 // ---------- 本棚タブ ----------
@@ -525,7 +606,17 @@ function renderBookshelfRow(problem, book) {
   memoBtn.innerHTML = ICON_PENCIL;
   memoBtn.title = "メモを付けて記録";
   memoBtn.addEventListener("click", () =>
-    openRateModal(namedProblem, { onDone: () => renderBookshelfBook(state.currentBookId) })
+    openRateModal(namedProblem, {
+      onSubmit: async (p, rating, opts) => {
+        try {
+          await submitAttempt(p, rating, opts);
+          renderBookshelfBook(state.currentBookId);
+          showToast("記録しました");
+        } catch (err) {
+          showToast("保存に失敗しました。もう一度お試しください");
+        }
+      },
+    })
   );
 
   const retireBtn = document.createElement("button");
@@ -669,14 +760,24 @@ function renderNoteCard(note) {
   if (note.book_title) parts.push(`${note.book_title} #${note.problem_number}`);
   if (note.unit_name) parts.push(note.unit_name);
   meta.textContent = parts.join(" ・ ");
+  const actions = document.createElement("div");
+  actions.className = "note-card-actions";
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "note-delete-btn";
+  editBtn.setAttribute("aria-label", "編集");
+  editBtn.innerHTML = ICON_PENCIL;
+  editBtn.addEventListener("click", () => startEditNote(note, card));
   const delBtn = document.createElement("button");
   delBtn.type = "button";
   delBtn.className = "note-delete-btn";
   delBtn.setAttribute("aria-label", "削除");
   delBtn.innerHTML = ICON_TRASH;
   delBtn.addEventListener("click", () => deleteNote(note, card));
+  actions.appendChild(editBtn);
+  actions.appendChild(delBtn);
   header.appendChild(meta);
-  header.appendChild(delBtn);
+  header.appendChild(actions);
   const summary = document.createElement("div");
   summary.className = "note-summary";
   if (note.mistake_type) {
@@ -689,6 +790,58 @@ function renderNoteCard(note) {
   card.appendChild(header);
   card.appendChild(summary);
   return card;
+}
+
+// メモ編集(2026-09-08追加)。attempt由来のメモは/api/attempts/{id}/memo、
+// standalone由来は/api/notes/{id}をPUTする。保存に成功したらカードを丸ごと作り直す。
+function startEditNote(note, cardEl) {
+  if (cardEl.querySelector(".note-edit-textarea")) return; // 二重に編集UIを開かない
+  const summaryEl = cardEl.querySelector(".note-summary");
+  const textarea = document.createElement("textarea");
+  textarea.className = "note-edit-textarea";
+  textarea.value = note.summary;
+
+  const actions = document.createElement("div");
+  actions.className = "note-edit-actions";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "note-edit-save";
+  saveBtn.textContent = "保存";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "note-edit-cancel";
+  cancelBtn.textContent = "キャンセル";
+  actions.appendChild(cancelBtn);
+  actions.appendChild(saveBtn);
+
+  summaryEl.replaceWith(textarea);
+  textarea.insertAdjacentElement("afterend", actions);
+  textarea.focus();
+
+  cancelBtn.addEventListener("click", () => {
+    actions.remove();
+    textarea.replaceWith(summaryEl);
+  });
+
+  saveBtn.addEventListener("click", async () => {
+    const value = textarea.value.trim();
+    if (!value) {
+      showToast("メモを入力してください");
+      return;
+    }
+    const url = note.kind === "attempt" ? `/api/attempts/${note.id}/memo` : `/api/notes/${note.id}`;
+    const body = note.kind === "attempt" ? { memo: value } : { summary: value };
+    saveBtn.disabled = true;
+    try {
+      await api(url, { method: "PUT", body: JSON.stringify(body) });
+      note.summary = value;
+      cardEl.replaceWith(renderNoteCard(note));
+      showToast("更新しました");
+    } catch (err) {
+      showToast("更新に失敗しました");
+      saveBtn.disabled = false;
+    }
+  });
 }
 
 async function deleteNote(note, cardEl) {
@@ -1010,18 +1163,14 @@ document.addEventListener("keydown", (e) => {
 
   // 今日タブ表示中: 1-5でキュー先頭の問題を即評価(メモなし)、Mでメモ付き評価モーダルを開く
   if (document.getElementById("tab-today").classList.contains("active")) {
-    const firstRow = document.querySelector("#today-queue .problem-row:not(.done)");
-    if (!firstRow) return;
-    const problem = (state.today?.queue || []).find(
-      (p) => String(p.id) === firstRow.dataset.problemId
-    );
+    const problem = (state.today?.queue || [])[0];
     if (!problem) return;
     if (e.key >= "1" && e.key <= "5") {
       e.preventDefault();
-      rateTodayProblem(problem, Number(e.key), firstRow);
+      rateTodayProblem(problem, Number(e.key));
     } else if (e.key === "m" || e.key === "M") {
       e.preventDefault();
-      openRateModal(problem, { onDone: () => markTodayRowDone(firstRow) });
+      openRateModal(problem, { onSubmit: submitTodayFromModal });
     }
   }
 });

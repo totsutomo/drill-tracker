@@ -163,6 +163,30 @@ def lookup_problem(book_slug: str, section: str, number: int):
     return problem
 
 
+@app.get("/api/problems/starred")
+def list_starred_problems():
+    """本棚タブを本ごとに開かなくても、重要マークした問題を全本横断でまとめて見るための一覧。
+    ヘッダーの★アイコンから開くドロワー用(2026-09-16追加)。
+    静的パス(/starred)は/{problem_id}より前に置かないと、FastAPIが先にint変換を試みて
+    422エラーになる(パスルーティングは登録順マッチのため)。"""
+    conn = get_connection()
+    rows = rows_to_dicts(
+        conn.execute(
+            "SELECT p.*, b.id AS book_id, b.title AS book_title, s.name AS section_name, "
+            "c.name AS chapter_name, u.name AS unit_name "
+            "FROM problems p "
+            "JOIN sections s ON p.section_id = s.id "
+            "JOIN books b ON s.book_id = b.id "
+            "JOIN units u ON p.unit_id = u.id "
+            "JOIN chapters c ON u.chapter_id = c.id "
+            "WHERE p.starred_at IS NOT NULL "
+            "ORDER BY p.starred_at DESC"
+        )
+    )
+    conn.close()
+    return rows
+
+
 @app.get("/api/problems/{problem_id}")
 def get_problem(problem_id: int):
     conn = get_connection()
@@ -357,6 +381,25 @@ def toggle_retire(problem_id: int):
     conn.commit()
     conn.close()
     return {"problem_id": problem_id, "retired": retired}
+
+
+@app.post("/api/problems/{problem_id}/star")
+def toggle_star(problem_id: int):
+    """重要マーク(2026-09-16追加)。retireと同じトグル方式。"""
+    conn = get_connection()
+    row = conn.execute("SELECT starred_at FROM problems WHERE id = ?", (problem_id,)).fetchone()
+    if row is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="problem not found")
+    if row[0]:
+        conn.execute("UPDATE problems SET starred_at = NULL WHERE id = ?", (problem_id,))
+        starred = False
+    else:
+        conn.execute("UPDATE problems SET starred_at = datetime('now') WHERE id = ?", (problem_id,))
+        starred = True
+    conn.commit()
+    conn.close()
+    return {"problem_id": problem_id, "starred": starred}
 
 
 # ---------- 今日のキュー ----------

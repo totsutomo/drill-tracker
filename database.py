@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS problems (
     number INTEGER NOT NULL,
     catalog_order INTEGER NOT NULL,
     retired_at TEXT,
+    starred_at TEXT,
     srs_last_rating INTEGER,
     srs_next_due_date TEXT,
     srs_streak INTEGER DEFAULT 0,
@@ -186,8 +187,12 @@ def init_db():
 
 
 def _migrate(conn):
-    # 現時点では初回スキーマのみ。将来カラム追加時はstudy-trackerと同じ
-    # 「PRAGMA table_info→ALTER TABLE ADD COLUMN」パターンをここに足していく。
+    # study-trackerと同じ「PRAGMA table_info→ALTER TABLE ADD COLUMN」パターン。
+    # CREATE TABLE IF NOT EXISTSは既存DBには効かないため、本番Turso・ローカル両方の
+    # 既存データを壊さずカラムを足すにはこの方式が必要(2026-09-16、starred_at追加時に導入)。
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(problems)").fetchall()}
+    if "starred_at" not in cols:
+        conn.execute("ALTER TABLE problems ADD COLUMN starred_at TEXT")
     conn.commit()
 
 

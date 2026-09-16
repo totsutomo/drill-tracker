@@ -30,6 +30,69 @@ document.getElementById("settings-btn").addEventListener("click", openSettingsDr
 document.getElementById("settings-close").addEventListener("click", closeSettingsDrawer);
 settingsBackdrop.addEventListener("click", closeSettingsDrawer);
 
+// ---------- 重要な問題ドロワー(本棚を本ごとに開かなくても全本横断で見る、2026-09-16追加) ----------
+
+const starredDrawer = document.getElementById("starred-drawer");
+const starredBackdrop = document.getElementById("starred-backdrop");
+
+function openStarredDrawer() {
+  starredDrawer.classList.add("open");
+  starredBackdrop.classList.remove("hidden");
+  loadStarredList();
+}
+function closeStarredDrawer() {
+  starredDrawer.classList.remove("open");
+  starredBackdrop.classList.add("hidden");
+}
+document.getElementById("starred-btn").addEventListener("click", openStarredDrawer);
+document.getElementById("starred-close").addEventListener("click", closeStarredDrawer);
+starredBackdrop.addEventListener("click", closeStarredDrawer);
+
+async function loadStarredList() {
+  const list = document.getElementById("starred-list");
+  list.innerHTML = "<p class='meta'>読み込み中...</p>";
+  const problems = await api("/api/problems/starred").catch(() => []);
+  document.getElementById("starred-empty").classList.toggle("hidden", problems.length > 0);
+  list.innerHTML = "";
+  problems.forEach((p) => list.appendChild(renderStarredRow(p)));
+}
+
+function renderStarredRow(p) {
+  const card = document.createElement("div");
+  card.className = "note-card";
+  const header = document.createElement("div");
+  header.className = "note-card-header";
+  const meta = document.createElement("div");
+  meta.className = "note-meta";
+  meta.textContent = [`${p.book_title || ""} ${p.section_name || ""} #${p.number}`, p.unit_name]
+    .filter(Boolean)
+    .join(" ・ ");
+  const unstarBtn = document.createElement("button");
+  unstarBtn.type = "button";
+  unstarBtn.className = "note-delete-btn";
+  unstarBtn.setAttribute("aria-label", "重要マークを外す");
+  unstarBtn.innerHTML = starIconSvg(true);
+  unstarBtn.addEventListener("click", async () => {
+    await api(`/api/problems/${p.id}/star`, { method: "POST" }).catch(() => showToast("解除に失敗しました"));
+    delete state.catalogCache[p.book_id];
+    card.remove();
+    document.getElementById("starred-empty").classList.toggle(
+      "hidden",
+      document.getElementById("starred-list").children.length > 0
+    );
+  });
+  header.appendChild(meta);
+  header.appendChild(unstarBtn);
+  const summary = document.createElement("div");
+  summary.className = "note-summary";
+  summary.textContent = p.srs_last_rating
+    ? `評価${p.srs_last_rating} / 次回 ${p.srs_next_due_date}`
+    : "未着手";
+  card.appendChild(header);
+  card.appendChild(summary);
+  return card;
+}
+
 // ---------- progress bar / toast (study-trackerと同じ仕組み) ----------
 
 let apiInFlight = 0;
@@ -177,6 +240,10 @@ const ICON_TRASH =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
   '<path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/>' +
   '<line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+function starIconSvg(filled) {
+  return `<svg viewBox="0 0 24 24" fill="${filled ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">` +
+    '<path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.2 6.1-.7z"/></svg>';
+}
 
 const RATING_LABELS = { 1: "難問", 2: "惜しい", 3: "苦戦", 4: "良好", 5: "即答" };
 
@@ -277,10 +344,35 @@ function renderTodayRow(problem) {
   memoBtn.title = "メモを付けて記録";
   memoBtn.addEventListener("click", () => openRateModal(problem, { onSubmit: submitTodayFromModal }));
 
+  const starBtn = createStarButton(problem);
+
   row.appendChild(info);
   row.appendChild(btnWrap);
   row.appendChild(memoBtn);
+  row.appendChild(starBtn);
   return row;
+}
+
+// 重要マークのトグルボタン(今日タブのキュー行・本棚タブの問題行で共通利用、2026-09-16追加)。
+// 評価と違って一覧から消えたりしないので、その場でアイコンとactiveクラスだけ書き換えて
+// 呼び出し側の再描画を待たずに反映する。
+function createStarButton(problem) {
+  const btn = document.createElement("button");
+  btn.className = "retire-btn star-btn" + (problem.starred_at ? " active" : "");
+  btn.innerHTML = starIconSvg(!!problem.starred_at);
+  btn.title = problem.starred_at ? "重要マークを外す" : "重要マークを付ける";
+  btn.addEventListener("click", async () => {
+    try {
+      const res = await api(`/api/problems/${problem.id}/star`, { method: "POST" });
+      problem.starred_at = res.starred ? "now" : null;
+      btn.classList.toggle("active", res.starred);
+      btn.innerHTML = starIconSvg(res.starred);
+      btn.title = res.starred ? "重要マークを外す" : "重要マークを付ける";
+    } catch (err) {
+      showToast("更新に失敗しました。もう一度お試しください");
+    }
+  });
+  return btn;
 }
 
 // 今日タブでの評価送信の共通処理(番号ボタンの即時評価・メモ付きモーダルの両方から呼ぶ)。
@@ -748,17 +840,20 @@ function renderBookshelfRow(problem, book) {
     })
   );
 
+  const starBtn = createStarButton(problem);
+
   const retireBtn = document.createElement("button");
   retireBtn.className = "retire-btn retire-toggle" + (problem.retired_at ? " active" : "");
   retireBtn.textContent = problem.retired_at ? "解除" : "もう出さない";
   retireBtn.addEventListener("click", () => toggleRetire(problem.id));
 
-  // 並び順: 情報→評価(最頻出)→メモ→もう出さない(最後、かつCSS側で1段余白を空けて誤タップを防ぐ)。
+  // 並び順: 情報→評価(最頻出)→メモ→★重要→もう出さない(最後、かつCSS側で1段余白を空けて誤タップを防ぐ)。
   // 以前はメモボタンが評価ボタンより前にあり、今日タブ(情報→評価→メモ)と順序が食い違って
-  // 指の動きが画面ごとに変わっていたため統一した(2026-09-07)
+  // 指の動きが画面ごとに変わっていたため統一した(2026-09-07)。★は2026-09-16追加でメモの隣に置いた。
   row.appendChild(info);
   row.appendChild(btnWrap);
   row.appendChild(memoBtn);
+  row.appendChild(starBtn);
   row.appendChild(retireBtn);
   wrap.appendChild(row);
   wrap.appendChild(historyPanel);

@@ -23,6 +23,11 @@
       </svg>
     </button>
     <h1>Drill</h1>
+    <button type="button" id="starred-btn" class="icon-btn" aria-label="重要な問題">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.2 6.1-.7z"/>
+      </svg>
+    </button>
     <div class="streak-chip" id="header-streak">
       <svg class="streak-flame" viewBox="0 0 24 24" fill="currentColor">
         <path d="M12 2c-.3 3-2 4.8-3.6 6.6C6.8 10.4 5.5 12.2 5.5 14.5 5.5 18.6 8.4 22 12 22s6.5-3.4 6.5-7.5c0-2.6-1.2-4.5-2.4-6.2-.3 1.6-1 2.6-1.9 3.3.2-3.1-.8-6.5-2.2-9.6z"/>
@@ -135,6 +140,17 @@
     </form>
     <button id="open-onboarding-btn-2" class="link-btn">単元をまとめて評価する画面を開く</button>
     <p class="meta" id="settings-last-updated">最終更新: 確認中...</p>
+  </aside>
+
+  <!-- 重要な問題(本を横断してまとめて見るドロワー) -->
+  <div id="starred-backdrop" class="backdrop hidden"></div>
+  <aside id="starred-drawer" class="settings-drawer">
+    <div class="settings-drawer-header">
+      <h2>重要な問題</h2>
+      <button type="button" id="starred-close" class="panel-close" aria-label="閉じる">×</button>
+    </div>
+    <div id="starred-list" class="notes-list"></div>
+    <p class="empty-state hidden" id="starred-empty">まだ重要マークした問題がありません。本棚や今日タブの★ボタンで印を付けられます。</p>
   </aside>
 
   <!-- 初回セットアップ: 単元一括自己申告 -->

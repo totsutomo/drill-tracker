@@ -180,6 +180,8 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 .retire-btn:active { transform: scale(0.94); }
 .retire-btn svg { width: 15px; height: 15px; }
 .retire-btn.active { color: var(--accent); border-color: var(--accent); }
+/* 重要マーク(星)は評価やもう出さないと紛らわしくないよう、ストリークの炎と同じ暖色にする(2026-09-16) */
+.star-btn.active { color: var(--streak-flame); border-color: var(--streak-flame); }
 /* 本棚の実際の「もう出さない/解除」トグルはテキスト長が変わる(retire-btnはメモアイコンボタンと共用のため
    ここだけ固定幅にして、評価ボタン列の位置がretired状態によって行間でズレないようにする)。
    また評価ボタンのすぐ右に置くと「5」を押すつもりで誤タップしやすいため、余白を追加で1段広く取る(2026-09-07) */

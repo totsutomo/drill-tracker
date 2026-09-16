@@ -290,6 +290,17 @@ function renderTodayRow(problem) {
 // awaitの後まで特定のrow要素への参照を持ち越さないことが、上のgetTodayRowEl注記のバグ修正の要。
 async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = null } = {}) {
   let ok = true;
+  // 「済み」に積むエントリはここで1回だけ作り、後で送信が成功した時にattempt_idを
+  // 直接このオブジェクトへ書き戻す(配列のインデックスで探すと、連続してキーボードで
+  // 評価した時に別の問題のエントリを誤って書き換えかねないため参照で持つ)。
+  const entry = {
+    ...problem,
+    rating,
+    memo,
+    mistake_type: mistakeType,
+    created_at: new Date().toISOString(),
+    attempt_id: null,
+  };
   await optimistic(
     () => {
       const rowEl = getTodayRowEl(problem.id);
@@ -297,16 +308,7 @@ async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = 
       if (!state.today) return;
       state.today.queue = state.today.queue.filter((p) => p.id !== problem.id);
       state.today.solved_today++;
-      state.today.done_today = [
-        {
-          ...problem,
-          rating,
-          memo,
-          mistake_type: mistakeType,
-          created_at: new Date().toISOString(),
-        },
-        ...(state.today.done_today || []),
-      ];
+      state.today.done_today = [entry, ...(state.today.done_today || [])];
       renderQuotaOnly();
       renderTodayDoneSection();
       document.getElementById("today-empty").classList.toggle("hidden", state.today.queue.length > 0);
@@ -317,7 +319,15 @@ async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = 
       loadToday();
     },
     () => submitAttempt(problem, rating, { memo, mistakeType })
-  ).catch(() => {});
+  )
+    .then((created) => {
+      entry.attempt_id = created.id;
+      lastRatedAttempt = {
+        attemptId: created.id,
+        label: `${problem.book_title || ""} #${problem.number}`,
+      };
+    })
+    .catch(() => {});
   return ok;
 }
 
@@ -328,6 +338,27 @@ async function rateTodayProblem(problem, rating) {
 async function submitTodayFromModal(problem, rating, opts) {
   const ok = await recordTodayAttempt(problem, rating, opts);
   if (ok) showToast("記録しました");
+}
+
+// 直近1件だけ戻せるUndo(2026-09-16追加、Zキー用)。評価ボタン/キーボード/メモ付きモーダル、
+// どの経路でもrecordTodayAttemptを通るのでここ1箇所で追跡すれば全部カバーできる。
+// スタックにはせず常に最新の1件のみ(戻したら次のUndo対象はまた無しに戻る)。
+let lastRatedAttempt = null;
+
+async function undoLastRating() {
+  if (!lastRatedAttempt) {
+    showToast("取り消せる記録がありません");
+    return;
+  }
+  const { attemptId, label } = lastRatedAttempt;
+  lastRatedAttempt = null;
+  try {
+    await api(`/api/attempts/${attemptId}`, { method: "DELETE" });
+    showToast(`${label} の評価を取り消しました`);
+    await loadToday();
+  } catch (err) {
+    showToast("取り消しに失敗しました");
+  }
 }
 
 function renderQuotaOnly() {
@@ -532,6 +563,15 @@ function renderMistakeChips() {
 document.getElementById("rate-modal-cancel").addEventListener("click", () => {
   document.getElementById("rate-modal").classList.add("hidden");
   rateModalCtx = null;
+});
+
+// メモ欄にフォーカスがある間、下のPC用ショートカット(isTypingTarget判定で無効化される)の
+// 代わりにEnter=記録・Shift+Enter=改行にする(2026-09-16、とっつー要望)。
+document.getElementById("rate-modal-memo").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    document.getElementById("rate-modal-submit").click();
+  }
 });
 
 document.getElementById("rate-modal-submit").addEventListener("click", async () => {
@@ -1335,7 +1375,22 @@ function isTypingTarget(el) {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
+// タブ切り替え(Ctrl+1〜4、今日/本棚/メモ/統計の表示順と対応)。数字だけの
+// 1〜5キーは評価に使っているため区別が要る一方、Ctrlは日本語入力中でも
+// 素通りするテキスト編集ショートカットではないため、isTypingTarget判定より前に
+// 置いてテキスト欄にフォーカスがあっても効くようにする(2026-09-16追加)。
+const TAB_SHORTCUT_ORDER = ["tab-today", "tab-bookshelf", "tab-notes", "tab-stats"];
+
 document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key >= "1" && e.key <= "4") {
+    const tabId = TAB_SHORTCUT_ORDER[Number(e.key) - 1];
+    if (tabId) {
+      e.preventDefault();
+      switchTab(tabId);
+    }
+    return;
+  }
+
   if (isTypingTarget(e.target)) return;
 
   // 評価モーダルが開いている間: 1-5で評価選択、Enterで記録、Escでキャンセル
@@ -1357,8 +1412,14 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  // 今日タブ表示中: 1-5でキュー先頭の問題を即評価(メモなし)、Mでメモ付き評価モーダルを開く
+  // 今日タブ表示中: 1-5でキュー先頭の問題を即評価(メモなし)、Mでメモ付き評価モーダルを開く、
+  // Zで直前の評価を取り消す(キューが空でも使えるよう、problem存在チェックより前に置く)
   if (document.getElementById("tab-today").classList.contains("active")) {
+    if (e.key === "z" || e.key === "Z") {
+      e.preventDefault();
+      undoLastRating();
+      return;
+    }
     const problem = (state.today?.queue || [])[0];
     if (!problem) return;
     if (e.key >= "1" && e.key <= "5") {

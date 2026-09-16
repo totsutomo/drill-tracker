@@ -197,6 +197,10 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 .history-text { font-size: 12px; color: var(--text-dim); flex: 1; min-width: 0; }
+.history-row-wrap { display: flex; flex-direction: column; gap: 0; }
+/* 履歴行ごとの評価・メモ編集パネル(2026-09-16追加)。バッジ+間隔ぶんだけ字下げして
+   どの記録に対する編集かが見た目でも分かるようにする */
+.history-edit-panel { padding: 8px 0 4px 30px; }
 
 /* メモ */
 .notes-filters { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }

@@ -661,7 +661,7 @@ function renderBookshelfRow(problem, book) {
     : "未着手";
   info.appendChild(num);
   info.appendChild(meta);
-  info.addEventListener("click", () => toggleProblemHistory(problem.id, historyPanel));
+  info.addEventListener("click", () => toggleProblemHistory(problem.id, historyPanel, meta));
 
   const namedProblem = { ...problem, book_title: book.title };
 
@@ -725,59 +725,166 @@ function renderBookshelfRow(problem, book) {
   return wrap;
 }
 
-// 問題ごとの過去の評価履歴(見る/wrong tapを取り消す用)。
-// 新規PUT/編集APIは作らず、既存のGET /api/problems/{id}(attempts同梱)とDELETE /api/attempts/{id}
-// (削除するとサーバー側でSRS状態を自動再計算する、main.pyのrecompute_problem_srs)を再利用する。
-// 間違った評価を付けた場合は、該当行を削除してから正しい評価ボタンを押し直す運用にする。
-async function toggleProblemHistory(problemId, panelEl) {
+// 問題ごとの過去の評価履歴(見る/直す/取り消す用)。
+// 削除はDELETE /api/attempts/{id}(サーバー側でSRS状態を自動再計算する、main.pyの
+// recompute_problem_srs)をそのまま使う。評価の書き換えは2026-09-16追加のPUT
+// /api/attempts/{id}/ratingを使う(local_dateは変えない。削除→付け直しだと
+// 過去日の記録が今日の日付に化けてしまうため、日付を変えない専用APIにした)。
+async function toggleProblemHistory(problemId, panelEl, metaEl) {
   if (!panelEl.classList.contains("hidden")) {
     panelEl.classList.add("hidden");
     return;
   }
   panelEl.classList.remove("hidden");
   panelEl.innerHTML = "<p class='meta'>読み込み中...</p>";
-  const detail = await api(`/api/problems/${problemId}`);
-  renderProblemHistory(panelEl, detail);
+  await refreshProblemHistory(problemId, panelEl, metaEl);
 }
 
-function renderProblemHistory(panelEl, detail) {
+async function refreshProblemHistory(problemId, panelEl, metaEl) {
+  const detail = await api(`/api/problems/${problemId}`);
+  if (metaEl) {
+    metaEl.textContent = detail.srs_last_rating
+      ? `評価${detail.srs_last_rating} / 次回 ${detail.srs_next_due_date}${detail.srs_graduated ? " / 卒業" : ""}(タップで履歴)`
+      : "未着手";
+  }
+  renderProblemHistory(panelEl, detail, metaEl);
+}
+
+function renderProblemHistory(panelEl, detail, metaEl) {
   panelEl.innerHTML = "";
   const attempts = (detail.attempts || []).slice().reverse(); // 新しい順に表示
   if (attempts.length === 0) {
     panelEl.innerHTML = "<p class='meta'>まだ記録がありません。</p>";
     return;
   }
-  attempts.forEach((a) => {
-    const row = document.createElement("div");
-    row.className = "history-row";
-    const badge = document.createElement("span");
-    badge.className = "history-badge";
-    badge.style.background = `var(--rate-${a.rating})`;
-    badge.textContent = a.rating;
-    const text = document.createElement("span");
-    text.className = "history-text";
-    const bits = [a.local_date];
-    if (a.source === "seed") bits.push("自己申告");
-    if (a.source === "import") bits.push("移行データ");
-    if (a.mistake_type) bits.push(a.mistake_type);
-    if (a.memo) bits.push(a.memo);
-    text.textContent = bits.join(" ・ ");
-    const delBtn = document.createElement("button");
-    delBtn.type = "button";
-    delBtn.className = "note-delete-btn";
-    delBtn.setAttribute("aria-label", "この記録を削除");
-    delBtn.innerHTML = ICON_TRASH;
-    delBtn.addEventListener("click", async () => {
-      if (!confirm("この記録を削除しますか?間違えて付けた評価を取り消す場合はここから削除できます。")) return;
-      await api(`/api/attempts/${a.id}`, { method: "DELETE" }).catch(() => showToast("削除に失敗しました"));
-      delete state.catalogCache[state.currentBookId];
-      renderBookshelfBook(state.currentBookId);
-    });
-    row.appendChild(badge);
-    row.appendChild(text);
-    row.appendChild(delBtn);
-    panelEl.appendChild(row);
+  attempts.forEach((a) => panelEl.appendChild(renderHistoryAttemptRow(a, detail.id, panelEl, metaEl)));
+}
+
+function renderHistoryText(textEl, a) {
+  const bits = [a.local_date];
+  if (a.source === "seed") bits.push("自己申告");
+  if (a.source === "import") bits.push("移行データ");
+  if (a.mistake_type) bits.push(a.mistake_type);
+  if (a.memo) bits.push(a.memo);
+  textEl.textContent = bits.join(" ・ ");
+}
+
+function renderHistoryAttemptRow(a, problemId, panelEl, metaEl) {
+  const wrap = document.createElement("div");
+  wrap.className = "history-row-wrap";
+
+  const row = document.createElement("div");
+  row.className = "history-row";
+  const badge = document.createElement("span");
+  badge.className = "history-badge";
+  badge.style.background = `var(--rate-${a.rating})`;
+  badge.textContent = a.rating;
+  const text = document.createElement("span");
+  text.className = "history-text";
+  renderHistoryText(text, a);
+
+  const editPanel = document.createElement("div");
+  editPanel.className = "history-edit-panel hidden";
+
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "note-delete-btn";
+  editBtn.setAttribute("aria-label", "この記録を編集");
+  editBtn.innerHTML = ICON_PENCIL;
+  editBtn.addEventListener("click", () => {
+    if (!editPanel.classList.contains("hidden")) {
+      editPanel.classList.add("hidden");
+      return;
+    }
+    editPanel.classList.remove("hidden");
+    renderHistoryEditPanel(a, problemId, editPanel, panelEl, metaEl, badge, text);
   });
+
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "note-delete-btn";
+  delBtn.setAttribute("aria-label", "この記録を削除");
+  delBtn.innerHTML = ICON_TRASH;
+  delBtn.addEventListener("click", async () => {
+    if (!confirm("この記録を削除しますか?間違えて付けた評価を取り消す場合はここから削除できます。")) return;
+    await api(`/api/attempts/${a.id}`, { method: "DELETE" }).catch(() => showToast("削除に失敗しました"));
+    delete state.catalogCache[state.currentBookId];
+    renderBookshelfBook(state.currentBookId);
+  });
+
+  row.appendChild(badge);
+  row.appendChild(text);
+  row.appendChild(editBtn);
+  row.appendChild(delBtn);
+  wrap.appendChild(row);
+  wrap.appendChild(editPanel);
+  return wrap;
+}
+
+// 今日タブの済みセクション編集パネルと同じ構成(評価ボタン+メモ欄)を、本棚の履歴行にも展開する。
+function renderHistoryEditPanel(a, problemId, editPanelEl, historyPanelEl, metaEl, badgeEl, textEl) {
+  editPanelEl.innerHTML = "";
+
+  const btnWrap = document.createElement("div");
+  btnWrap.className = "rate-buttons-inline";
+  for (let r = 1; r <= 5; r++) {
+    const btn = document.createElement("button");
+    btn.className = "rate-btn";
+    btn.dataset.rating = String(r);
+    btn.textContent = String(r);
+    btn.title = RATING_LABELS[r];
+    if (r === a.rating) btn.style.outline = "2px solid #fff";
+    btn.addEventListener("click", () =>
+      changeHistoryRating(a, r, problemId, historyPanelEl, metaEl, badgeEl, textEl)
+    );
+    btnWrap.appendChild(btn);
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "note-edit-textarea";
+  textarea.placeholder = "メモを追加・編集";
+  textarea.value = a.memo || "";
+
+  const actions = document.createElement("div");
+  actions.className = "note-edit-actions";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "note-edit-save";
+  saveBtn.textContent = "メモを保存";
+  saveBtn.addEventListener("click", () =>
+    saveHistoryMemo(a, textarea.value.trim(), problemId, historyPanelEl, metaEl, textEl)
+  );
+  actions.appendChild(saveBtn);
+
+  editPanelEl.appendChild(btnWrap);
+  editPanelEl.appendChild(textarea);
+  editPanelEl.appendChild(actions);
+}
+
+async function changeHistoryRating(a, newRating, problemId, historyPanelEl, metaEl, badgeEl, textEl) {
+  if (newRating === a.rating) return;
+  try {
+    await api(`/api/attempts/${a.id}/rating`, {
+      method: "PUT",
+      body: JSON.stringify({ rating: newRating, mistake_type: newRating <= 3 ? a.mistake_type : null }),
+    });
+    delete state.catalogCache[state.currentBookId];
+    await refreshProblemHistory(problemId, historyPanelEl, metaEl);
+    showToast("評価を更新しました");
+  } catch (err) {
+    showToast("更新に失敗しました。もう一度お試しください");
+  }
+}
+
+async function saveHistoryMemo(a, memo, problemId, historyPanelEl, metaEl, textEl) {
+  try {
+    await api(`/api/attempts/${a.id}/memo`, { method: "PUT", body: JSON.stringify({ memo }) });
+    delete state.catalogCache[state.currentBookId];
+    await refreshProblemHistory(problemId, historyPanelEl, metaEl);
+    showToast("メモを保存しました");
+  } catch (err) {
+    showToast("保存に失敗しました。もう一度お試しください");
+  }
 }
 
 async function toggleRetire(problemId) {

@@ -300,6 +300,32 @@ def update_attempt_memo(attempt_id: int, payload: AttemptMemoUpdateIn):
     return {"updated": True}
 
 
+class AttemptRatingUpdateIn(BaseModel):
+    rating: int
+    mistake_type: Optional[str] = None
+
+
+@app.put("/api/attempts/{attempt_id}/rating")
+def update_attempt_rating(attempt_id: int, payload: AttemptRatingUpdateIn):
+    """本棚タブの履歴編集用(2026-09-16追加)。削除→付け直すと当日の日付に
+    変わってしまい過去日の記録を直す用途に使えないため、local_date/sourceは
+    変えずにrating/mistake_typeだけ書き換えてSRSを再計算する。"""
+    conn = get_connection()
+    row = conn.execute("SELECT problem_id FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+    if row is None:
+        conn.close()
+        raise HTTPException(status_code=404, detail="attempt not found")
+    problem_id = row[0]
+    conn.execute(
+        "UPDATE attempts SET rating = ?, mistake_type = ? WHERE id = ?",
+        (payload.rating, payload.mistake_type, attempt_id),
+    )
+    recompute_problem_srs(conn, problem_id)
+    conn.commit()
+    conn.close()
+    return {"updated": True}
+
+
 @app.delete("/api/attempts/{attempt_id}")
 def delete_attempt(attempt_id: int):
     conn = get_connection()

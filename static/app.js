@@ -73,13 +73,20 @@ function renderStarredRow(p) {
   unstarBtn.setAttribute("aria-label", "重要マークを外す");
   unstarBtn.innerHTML = starIconSvg(true);
   unstarBtn.addEventListener("click", async () => {
-    await api(`/api/problems/${p.id}/star`, { method: "POST" }).catch(() => showToast("解除に失敗しました"));
-    delete state.catalogCache[p.book_id];
+    // 2026-09-16: 楽観的更新に統一。先にカードを消し、失敗したら丸ごと読み直す
+    // (このドロワーは★が付いた問題しか出さない一覧なので、個別revertより読み直しの方が単純)。
     card.remove();
+    delete state.catalogCache[p.book_id];
     document.getElementById("starred-empty").classList.toggle(
       "hidden",
       document.getElementById("starred-list").children.length > 0
     );
+    try {
+      await api(`/api/problems/${p.id}/star`, { method: "POST" });
+    } catch (err) {
+      showToast("解除に失敗しました");
+      loadStarredList();
+    }
   });
   header.appendChild(meta);
   header.appendChild(unstarBtn);
@@ -231,6 +238,36 @@ function newClientId() {
   return "cid-" + Date.now() + "-" + Math.random().toString(16).slice(2);
 }
 
+// ---------- SRSプレビュー計算(2026-09-16追加、database.pyのcompute_next_srs_stateの複製) ----------
+// 「本棚タブの評価ボタンを押した瞬間に次回予定日を表示したい」という楽観的更新のためだけの
+// クライアント側の見込み計算。本物の計算はあくまでサーバー(database.py)側で行われ、そちらが
+// 正。ここでの値はUIを一瞬で更新するための「たぶんこうなる」という予測に過ぎず、ズレていても
+// 実害はない(サーバーの計算結果を待って上書きすることはせず、ページを開き直せば正しい値になる
+// 程度の話)。ただし database.py の INTERVAL_DAYS / GRADUATED_INTERVAL_DAYS /
+// 卒業条件(streak>=2)を変更した時は、ここも必ず同じ値に直すこと。
+const SRS_INTERVAL_DAYS_PREVIEW = { 1: 1, 2: 2, 3: 4, 4: 8, 5: 15 };
+const SRS_GRADUATED_INTERVAL_DAYS_PREVIEW = 60;
+
+function addDaysLocal(dateStr, days) {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return formatLocalDate(d);
+}
+
+// fromDateから新規に評価を1件追加した場合の見込みを返す。priorStreakは「この評価を
+// 追加する前」の problem.srs_streak をそのまま渡す(新規評価にのみ正確に使える。
+// 既存の評価を書き換える操作は「追加前のstreak」を復元できないため対象外)。
+function previewSrsNextDue(priorStreak, rating, fromDate) {
+  const newStreak = rating >= 4 ? priorStreak + 1 : 0;
+  const graduated = newStreak >= 2;
+  const interval = graduated ? SRS_GRADUATED_INTERVAL_DAYS_PREVIEW : SRS_INTERVAL_DAYS_PREVIEW[rating];
+  return { nextDue: addDaysLocal(fromDate, interval), streak: newStreak, graduated };
+}
+
+function formatSrsMeta(rating, nextDue, graduated) {
+  return `評価${rating} / 次回 ${nextDue}${graduated ? " / 卒業" : ""}(タップで履歴)`;
+}
+
 // ---------- アイコン(絵文字を使わず、アプリのトーンに合わせた線画SVGを共通定義) ----------
 
 const ICON_PENCIL =
@@ -354,22 +391,34 @@ function renderTodayRow(problem) {
 }
 
 // 重要マークのトグルボタン(今日タブのキュー行・本棚タブの問題行で共通利用、2026-09-16追加)。
-// 評価と違って一覧から消えたりしないので、その場でアイコンとactiveクラスだけ書き換えて
-// 呼び出し側の再描画を待たずに反映する。
+// 結果が完全に予測できる単純なトグルなので、サーバー応答を待たずに先にアイコンを
+// 書き換える(2026-09-16、楽観的更新に統一する方針に合わせて変更)。失敗時だけ戻す。
+function applyStarState(btn, problem, starred) {
+  problem.starred_at = starred ? "now" : null;
+  btn.classList.toggle("active", starred);
+  btn.innerHTML = starIconSvg(starred);
+  btn.title = starred ? "重要マークを外す" : "重要マークを付ける";
+}
+
 function createStarButton(problem) {
   const btn = document.createElement("button");
   btn.className = "retire-btn star-btn" + (problem.starred_at ? " active" : "");
   btn.innerHTML = starIconSvg(!!problem.starred_at);
   btn.title = problem.starred_at ? "重要マークを外す" : "重要マークを付ける";
   btn.addEventListener("click", async () => {
+    // サーバー側はNULL/現在時刻のトグルなので、連打で2回リクエストが飛ぶと
+    // 見た目と実データの向きがズレる。連打防止に送信中だけ無効化する。
+    if (btn.disabled) return;
+    const wasStarred = !!problem.starred_at;
+    applyStarState(btn, problem, !wasStarred);
+    btn.disabled = true;
     try {
-      const res = await api(`/api/problems/${problem.id}/star`, { method: "POST" });
-      problem.starred_at = res.starred ? "now" : null;
-      btn.classList.toggle("active", res.starred);
-      btn.innerHTML = starIconSvg(res.starred);
-      btn.title = res.starred ? "重要マークを外す" : "重要マークを付ける";
+      await api(`/api/problems/${problem.id}/star`, { method: "POST" });
     } catch (err) {
+      applyStarState(btn, problem, wasStarred);
       showToast("更新に失敗しました。もう一度お試しください");
+    } finally {
+      btn.disabled = false;
     }
   });
   return btn;
@@ -417,6 +466,8 @@ async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = 
       lastRatedAttempt = {
         attemptId: created.id,
         label: `${problem.book_title || ""} #${problem.number}`,
+        entry,
+        problem,
       };
     })
     .catch(() => {});
@@ -442,14 +493,23 @@ async function undoLastRating() {
     showToast("取り消せる記録がありません");
     return;
   }
-  const { attemptId, label } = lastRatedAttempt;
+  const { attemptId, label, entry, problem } = lastRatedAttempt;
   lastRatedAttempt = null;
+  // 2026-09-16: 楽観的更新に統一。サーバー応答を待たず先にキューへ戻す
+  // (problemは評価前のオブジェクト参照そのものなので、srs_*系フィールドは
+  // rateされる前の値のまま=キューに戻す表示として正しい)。
+  if (state.today) {
+    state.today.done_today = (state.today.done_today || []).filter((d) => d !== entry);
+    state.today.queue = [problem, ...state.today.queue];
+    state.today.solved_today = Math.max(0, state.today.solved_today - 1);
+    renderToday();
+  }
+  showToast(`${label} の評価を取り消しました`);
   try {
     await api(`/api/attempts/${attemptId}`, { method: "DELETE" });
-    showToast(`${label} の評価を取り消しました`);
-    await loadToday();
   } catch (err) {
-    showToast("取り消しに失敗しました");
+    showToast("取り消しに失敗しました。最新の状態を再取得します");
+    await loadToday();
   }
 }
 
@@ -566,32 +626,42 @@ function renderTodayDoneEditPanel(a, panelEl) {
 
 // 評価ボタンの並び順定義(1〜5)そのものを流用しているため、番号自体は変わらない。
 // 5<=3のときだけmistake_typeを引き継ぐのは既存の評価モーダルと同じ仕様。
+// 2026-09-16: 楽観的更新に統一する方針のため、先にaを書き換えて再描画してから
+// 裏でDELETE→POSTを送る(失敗時だけ元に戻す)。ここは「既存の評価を書き換える」操作で
+// 「追加前のstreak」を復元できないため、本棚の新規評価ボタンと違って次回予定日の
+// プレビュー計算はしない(済みセクション自体にも次回予定日は表示していない)。
 async function changeTodayDoneRating(a, newRating, panelEl) {
   if (newRating === a.rating) return;
+  const prev = { attempt_id: a.attempt_id, rating: a.rating, mistake_type: a.mistake_type, created_at: a.created_at };
+  a.rating = newRating;
+  a.mistake_type = newRating <= 3 ? a.mistake_type : null;
+  renderTodayDoneSection();
   try {
-    await api(`/api/attempts/${a.attempt_id}`, { method: "DELETE" });
+    await api(`/api/attempts/${prev.attempt_id}`, { method: "DELETE" });
     const created = await submitAttempt(a, newRating, {
       memo: a.memo,
-      mistakeType: newRating <= 3 ? a.mistake_type : null,
+      mistakeType: a.mistake_type,
     });
     a.attempt_id = created.id;
-    a.rating = newRating;
-    a.mistake_type = newRating <= 3 ? a.mistake_type : null;
     a.created_at = created.created_at;
-    renderTodayDoneSection();
     showToast("評価を更新しました");
   } catch (err) {
+    Object.assign(a, prev);
+    renderTodayDoneSection();
     showToast("更新に失敗しました。もう一度お試しください");
   }
 }
 
 async function saveTodayDoneMemo(a, memo, panelEl) {
+  const prevMemo = a.memo;
+  a.memo = memo || null;
+  renderTodayDoneSection();
   try {
     await api(`/api/attempts/${a.attempt_id}/memo`, { method: "PUT", body: JSON.stringify({ memo }) });
-    a.memo = memo || null;
-    renderTodayDoneSection();
     showToast("メモを保存しました");
   } catch (err) {
+    a.memo = prevMemo;
+    renderTodayDoneSection();
     showToast("保存に失敗しました。もう一度お試しください");
   }
 }
@@ -797,6 +867,20 @@ function renderBookshelfRow(problem, book) {
 
   const namedProblem = { ...problem, book_title: book.title };
 
+  // 新規評価1件ぶんのSRS見込みをその場で計算してmeta表示・problemのローカル状態を即座に
+  // 書き換える(2026-09-16、楽観的更新に統一する方針)。previewSrsNextDueは「追加前のstreak」
+  // が必要で、新規評価(このボタン)の場合はproblem.srs_streakがそのまま使える
+  // (既存評価の書き換え系操作は「追加前streak」を復元できないため対象外、そちらは
+  // changeTodayDoneRating/changeHistoryRatingで別途コメント)。
+  function applyRatingPreview(rating) {
+    const preview = previewSrsNextDue(problem.srs_streak || 0, rating, todayStr());
+    problem.srs_last_rating = rating;
+    problem.srs_next_due_date = preview.nextDue;
+    problem.srs_streak = preview.streak;
+    problem.srs_graduated = preview.graduated ? 1 : 0;
+    meta.textContent = formatSrsMeta(rating, preview.nextDue, preview.graduated);
+  }
+
   const btnWrap = document.createElement("div");
   btnWrap.className = "rate-buttons-inline";
   for (let r = 1; r <= 5; r++) {
@@ -805,20 +889,24 @@ function renderBookshelfRow(problem, book) {
     btn.dataset.rating = String(r);
     btn.textContent = String(r);
     btn.title = RATING_LABELS[r];
-    // Todayタブと同じく、番号ボタンは1タップでそのまま記録する(メモなし)
-    // 次回due日はサーバー側のSRS計算に依存するため、Todayタブのような完全な楽観的更新(先に見た目を確定させる)は
-    // できないが、送信中であることだけは即座に見せて「押した感」を出す
+    // Todayタブと同じく、番号ボタンは1タップでそのまま記録する(メモなし)。
+    // 失敗した場合だけ元のmeta表示・problemの状態に戻す。
     btn.addEventListener("click", async () => {
       const prevMeta = meta.textContent;
-      meta.textContent = "記録中...";
+      const prevFields = {
+        srs_last_rating: problem.srs_last_rating,
+        srs_next_due_date: problem.srs_next_due_date,
+        srs_streak: problem.srs_streak,
+        srs_graduated: problem.srs_graduated,
+      };
+      applyRatingPreview(r);
       try {
         await submitAttempt(namedProblem, r);
       } catch (err) {
+        Object.assign(problem, prevFields);
         meta.textContent = prevMeta;
         showToast("保存に失敗しました。もう一度お試しください");
-        return;
       }
-      renderBookshelfBook(state.currentBookId);
     });
     btnWrap.appendChild(btn);
   }
@@ -829,11 +917,20 @@ function renderBookshelfRow(problem, book) {
   memoBtn.addEventListener("click", () =>
     openRateModal(namedProblem, {
       onSubmit: async (p, rating, opts) => {
+        const prevMeta = meta.textContent;
+        const prevFields = {
+          srs_last_rating: problem.srs_last_rating,
+          srs_next_due_date: problem.srs_next_due_date,
+          srs_streak: problem.srs_streak,
+          srs_graduated: problem.srs_graduated,
+        };
+        applyRatingPreview(rating);
         try {
           await submitAttempt(p, rating, opts);
-          renderBookshelfBook(state.currentBookId);
           showToast("記録しました");
         } catch (err) {
+          Object.assign(problem, prevFields);
+          meta.textContent = prevMeta;
           showToast("保存に失敗しました。もう一度お試しください");
         }
       },
@@ -845,7 +942,22 @@ function renderBookshelfRow(problem, book) {
   const retireBtn = document.createElement("button");
   retireBtn.className = "retire-btn retire-toggle" + (problem.retired_at ? " active" : "");
   retireBtn.textContent = problem.retired_at ? "解除" : "もう出さない";
-  retireBtn.addEventListener("click", () => toggleRetire(problem.id));
+  retireBtn.addEventListener("click", async () => {
+    const wasRetired = !!problem.retired_at;
+    problem.retired_at = wasRetired ? null : "now";
+    retireBtn.classList.toggle("active", !wasRetired);
+    retireBtn.textContent = wasRetired ? "もう出さない" : "解除";
+    row.classList.toggle("retired", !wasRetired);
+    try {
+      await api(`/api/problems/${problem.id}/retire`, { method: "POST" });
+    } catch (err) {
+      problem.retired_at = wasRetired ? "now" : null;
+      retireBtn.classList.toggle("active", wasRetired);
+      retireBtn.textContent = wasRetired ? "解除" : "もう出さない";
+      row.classList.toggle("retired", wasRetired);
+      showToast("更新に失敗しました。もう一度お試しください");
+    }
+  });
 
   // 並び順: 情報→評価(最頻出)→メモ→★重要→もう出さない(最後、かつCSS側で1段余白を空けて誤タップを防ぐ)。
   // 以前はメモボタンが評価ボタンより前にあり、今日タブ(情報→評価→メモ)と順序が食い違って
@@ -879,10 +991,26 @@ async function refreshProblemHistory(problemId, panelEl, metaEl) {
   const detail = await api(`/api/problems/${problemId}`);
   if (metaEl) {
     metaEl.textContent = detail.srs_last_rating
-      ? `評価${detail.srs_last_rating} / 次回 ${detail.srs_next_due_date}${detail.srs_graduated ? " / 卒業" : ""}(タップで履歴)`
+      ? formatSrsMeta(detail.srs_last_rating, detail.srs_next_due_date, detail.srs_graduated)
       : "未着手";
   }
   renderProblemHistory(panelEl, detail, metaEl);
+}
+
+// 履歴の評価修正・削除は既存の記録を書き換える操作で「追加前のstreak」を復元できないため、
+// 次回予定日の正確なプレビュー計算はできない(本棚の新規評価ボタンと違う制約、
+// previewSrsNextDueの注記を参照)。楽観的更新はするが、外側のmeta行(次回予定日)だけは
+// 裏で問題を取り直して追いかけて直す(失敗しても静かに諦める。次に開けば直る表示専用の値なので)。
+async function refreshMetaOnly(problemId, metaEl) {
+  if (!metaEl) return;
+  try {
+    const detail = await api(`/api/problems/${problemId}`);
+    metaEl.textContent = detail.srs_last_rating
+      ? formatSrsMeta(detail.srs_last_rating, detail.srs_next_due_date, detail.srs_graduated)
+      : "未着手";
+  } catch (err) {
+    // 裏更新なので失敗は無視する
+  }
 }
 
 function renderProblemHistory(panelEl, detail, metaEl) {
@@ -942,9 +1070,20 @@ function renderHistoryAttemptRow(a, problemId, panelEl, metaEl) {
   delBtn.innerHTML = ICON_TRASH;
   delBtn.addEventListener("click", async () => {
     if (!confirm("この記録を削除しますか?間違えて付けた評価を取り消す場合はここから削除できます。")) return;
-    await api(`/api/attempts/${a.id}`, { method: "DELETE" }).catch(() => showToast("削除に失敗しました"));
+    // 2026-09-16: 削除も楽観的更新に統一。先に行を消し、失敗した時だけ履歴パネル全体を
+    // 取り直して復元する(個々の行だけを元に戻すより、確実に正しい状態に戻せるため)。
+    wrap.remove();
     delete state.catalogCache[state.currentBookId];
-    renderBookshelfBook(state.currentBookId);
+    if (panelEl.children.length === 0) {
+      panelEl.innerHTML = "<p class='meta'>まだ記録がありません。</p>";
+    }
+    try {
+      await api(`/api/attempts/${a.id}`, { method: "DELETE" });
+      refreshMetaOnly(problemId, metaEl);
+    } catch (err) {
+      showToast("削除に失敗しました");
+      await refreshProblemHistory(problemId, panelEl, metaEl);
+    }
   });
 
   row.appendChild(badge);
@@ -970,7 +1109,7 @@ function renderHistoryEditPanel(a, problemId, editPanelEl, historyPanelEl, metaE
     btn.title = RATING_LABELS[r];
     if (r === a.rating) btn.style.outline = "2px solid #fff";
     btn.addEventListener("click", () =>
-      changeHistoryRating(a, r, problemId, historyPanelEl, metaEl, badgeEl, textEl)
+      changeHistoryRating(a, r, problemId, historyPanelEl, metaEl, badgeEl, textEl, editPanelEl)
     );
     btnWrap.appendChild(btn);
   }
@@ -996,36 +1135,46 @@ function renderHistoryEditPanel(a, problemId, editPanelEl, historyPanelEl, metaE
   editPanelEl.appendChild(actions);
 }
 
-async function changeHistoryRating(a, newRating, problemId, historyPanelEl, metaEl, badgeEl, textEl) {
+async function changeHistoryRating(a, newRating, problemId, historyPanelEl, metaEl, badgeEl, textEl, editPanelEl) {
   if (newRating === a.rating) return;
+  const prev = { rating: a.rating, mistake_type: a.mistake_type };
+  a.rating = newRating;
+  a.mistake_type = newRating <= 3 ? a.mistake_type : null;
+  badgeEl.style.background = `var(--rate-${a.rating})`;
+  badgeEl.textContent = a.rating;
+  renderHistoryText(textEl, a);
+  renderHistoryEditPanel(a, problemId, editPanelEl, historyPanelEl, metaEl, badgeEl, textEl);
   try {
     await api(`/api/attempts/${a.id}/rating`, {
       method: "PUT",
-      body: JSON.stringify({ rating: newRating, mistake_type: newRating <= 3 ? a.mistake_type : null }),
+      body: JSON.stringify({ rating: newRating, mistake_type: a.mistake_type }),
     });
     delete state.catalogCache[state.currentBookId];
-    await refreshProblemHistory(problemId, historyPanelEl, metaEl);
+    refreshMetaOnly(problemId, metaEl);
     showToast("評価を更新しました");
   } catch (err) {
+    Object.assign(a, prev);
+    badgeEl.style.background = `var(--rate-${a.rating})`;
+    badgeEl.textContent = a.rating;
+    renderHistoryText(textEl, a);
+    renderHistoryEditPanel(a, problemId, editPanelEl, historyPanelEl, metaEl, badgeEl, textEl);
     showToast("更新に失敗しました。もう一度お試しください");
   }
 }
 
 async function saveHistoryMemo(a, memo, problemId, historyPanelEl, metaEl, textEl) {
+  const prevMemo = a.memo;
+  a.memo = memo || null;
+  renderHistoryText(textEl, a);
   try {
     await api(`/api/attempts/${a.id}/memo`, { method: "PUT", body: JSON.stringify({ memo }) });
     delete state.catalogCache[state.currentBookId];
-    await refreshProblemHistory(problemId, historyPanelEl, metaEl);
     showToast("メモを保存しました");
   } catch (err) {
+    a.memo = prevMemo;
+    renderHistoryText(textEl, a);
     showToast("保存に失敗しました。もう一度お試しください");
   }
-}
-
-async function toggleRetire(problemId) {
-  await api(`/api/problems/${problemId}/retire`, { method: "POST" });
-  delete state.catalogCache[state.currentBookId];
-  renderBookshelfBook(state.currentBookId);
 }
 
 document.getElementById("open-onboarding-btn").addEventListener("click", openOnboarding);
@@ -1162,15 +1311,17 @@ function startEditNote(note, cardEl) {
     }
     const url = note.kind === "attempt" ? `/api/attempts/${note.id}/memo` : `/api/notes/${note.id}`;
     const body = note.kind === "attempt" ? { memo: value } : { summary: value };
-    saveBtn.disabled = true;
+    // 2026-09-16: 楽観的更新に統一。先にカードを新しい内容で作り直し、失敗した時だけ
+    // 一覧を読み直す(置き換え後は古いcardEl参照が使えなくなるため、個別revertではなく
+    // loadNotesでの全体再取得にしている)。
+    note.summary = value;
+    cardEl.replaceWith(renderNoteCard(note));
     try {
       await api(url, { method: "PUT", body: JSON.stringify(body) });
-      note.summary = value;
-      cardEl.replaceWith(renderNoteCard(note));
       showToast("更新しました");
     } catch (err) {
       showToast("更新に失敗しました");
-      saveBtn.disabled = false;
+      loadNotes();
     }
   });
 }
@@ -1180,11 +1331,12 @@ async function deleteNote(note, cardEl) {
   // note.kind === "standalone" は質問ログ由来のメモ(/api/notesで削除)、
   // "attempt" は問題評価に紐づくメモ(削除するとattempt自体を取り消し、SRS状態も再計算される)
   const url = note.kind === "attempt" ? `/api/attempts/${note.id}` : `/api/notes/${note.id}`;
+  cardEl.remove();
   try {
     await api(url, { method: "DELETE" });
-    cardEl.remove();
   } catch (err) {
     showToast("削除に失敗しました");
+    loadNotes();
   }
 }
 

@@ -660,8 +660,12 @@ def stats_overview(date: str):
         book["progress_percent"] = round(attempted / total * 100) if total else 0
 
     exam_target_date = _get_setting(conn, "exam_target_date")
+    # 2026-09-08にEXERCISEセクションを今日タブの出題対象から除外した際、ここのペース計算だけ
+    # 直し忘れていた(EXERCISE分の未着手問題が「残り」に永久にカウントされ続け、pace_per_dayが
+    # 実態より過大に出る不整合があった)。queue_todayと同じ条件に揃えて2026-09-16に修正。
     unattempted_total = conn.execute(
-        "SELECT COUNT(*) FROM problems WHERE srs_last_rating IS NULL AND retired_at IS NULL"
+        "SELECT COUNT(*) FROM problems p JOIN sections s ON p.section_id = s.id "
+        "WHERE p.srs_last_rating IS NULL AND p.retired_at IS NULL AND s.name != 'EXERCISE'"
     ).fetchone()[0]
 
     days_left = None

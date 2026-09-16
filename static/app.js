@@ -198,6 +198,23 @@ async function api(path, options = {}, retries = 3) {
   }
 }
 
+// 楽観的更新の成功後にIndexedDBキャッシュ(loadWithCacheが読むstale-while-revalidate用)も
+// 揃えておくためのヘルパー(2026-09-16追加)。楽観的更新はstate.today/state.catalogCacheという
+// メモリ上の状態を直接書き換えるだけで、IndexedDB側はGETした時にしかcacheSetされない。
+// これを放っておくと「タブを離れて戻る→一瞬古い状態が描画される→フレッシュな取得で直る」
+// というフリッカーが起きる(以前は成功後に必ずrenderBookshelfBook等でGETし直していたため
+// 気づかなかった問題)。
+function syncTodayCache() {
+  if (!state.today) return;
+  cacheSet(`/api/queue/today?date=${todayStr()}`, state.today);
+}
+
+function syncCatalogCache(bookId) {
+  if (state.catalogCache[bookId]) {
+    cacheSet(`/api/books/${bookId}/catalog`, state.catalogCache[bookId]);
+  }
+}
+
 // キャッシュ即描画→裏で本物のfetchが終わったら再描画、の定型処理
 async function loadWithCache(path, render) {
   const cached = await cacheGet(path);
@@ -381,7 +398,7 @@ function renderTodayRow(problem) {
   memoBtn.title = "メモを付けて記録";
   memoBtn.addEventListener("click", () => openRateModal(problem, { onSubmit: submitTodayFromModal }));
 
-  const starBtn = createStarButton(problem);
+  const starBtn = createStarButton(problem, syncTodayCache);
 
   row.appendChild(info);
   row.appendChild(btnWrap);
@@ -400,7 +417,7 @@ function applyStarState(btn, problem, starred) {
   btn.title = starred ? "重要マークを外す" : "重要マークを付ける";
 }
 
-function createStarButton(problem) {
+function createStarButton(problem, onSynced) {
   const btn = document.createElement("button");
   btn.className = "retire-btn star-btn" + (problem.starred_at ? " active" : "");
   btn.innerHTML = starIconSvg(!!problem.starred_at);
@@ -414,6 +431,7 @@ function createStarButton(problem) {
     btn.disabled = true;
     try {
       await api(`/api/problems/${problem.id}/star`, { method: "POST" });
+      if (onSynced) onSynced();
     } catch (err) {
       applyStarState(btn, problem, wasStarred);
       showToast("更新に失敗しました。もう一度お試しください");
@@ -469,6 +487,7 @@ async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = 
         entry,
         problem,
       };
+      syncTodayCache();
     })
     .catch(() => {});
   return ok;
@@ -507,6 +526,7 @@ async function undoLastRating() {
   showToast(`${label} の評価を取り消しました`);
   try {
     await api(`/api/attempts/${attemptId}`, { method: "DELETE" });
+    syncTodayCache();
   } catch (err) {
     showToast("取り消しに失敗しました。最新の状態を再取得します");
     await loadToday();
@@ -644,6 +664,7 @@ async function changeTodayDoneRating(a, newRating, panelEl) {
     });
     a.attempt_id = created.id;
     a.created_at = created.created_at;
+    syncTodayCache();
     showToast("評価を更新しました");
   } catch (err) {
     Object.assign(a, prev);
@@ -658,6 +679,7 @@ async function saveTodayDoneMemo(a, memo, panelEl) {
   renderTodayDoneSection();
   try {
     await api(`/api/attempts/${a.attempt_id}/memo`, { method: "PUT", body: JSON.stringify({ memo }) });
+    syncTodayCache();
     showToast("メモを保存しました");
   } catch (err) {
     a.memo = prevMemo;
@@ -902,6 +924,7 @@ function renderBookshelfRow(problem, book) {
       applyRatingPreview(r);
       try {
         await submitAttempt(namedProblem, r);
+        syncCatalogCache(book.id);
       } catch (err) {
         Object.assign(problem, prevFields);
         meta.textContent = prevMeta;
@@ -927,6 +950,7 @@ function renderBookshelfRow(problem, book) {
         applyRatingPreview(rating);
         try {
           await submitAttempt(p, rating, opts);
+          syncCatalogCache(book.id);
           showToast("記録しました");
         } catch (err) {
           Object.assign(problem, prevFields);
@@ -937,7 +961,7 @@ function renderBookshelfRow(problem, book) {
     })
   );
 
-  const starBtn = createStarButton(problem);
+  const starBtn = createStarButton(problem, () => syncCatalogCache(book.id));
 
   const retireBtn = document.createElement("button");
   retireBtn.className = "retire-btn retire-toggle" + (problem.retired_at ? " active" : "");
@@ -950,6 +974,7 @@ function renderBookshelfRow(problem, book) {
     row.classList.toggle("retired", !wasRetired);
     try {
       await api(`/api/problems/${problem.id}/retire`, { method: "POST" });
+      syncCatalogCache(book.id);
     } catch (err) {
       problem.retired_at = wasRetired ? "now" : null;
       retireBtn.classList.toggle("active", wasRetired);
@@ -1073,12 +1098,12 @@ function renderHistoryAttemptRow(a, problemId, panelEl, metaEl) {
     // 2026-09-16: 削除も楽観的更新に統一。先に行を消し、失敗した時だけ履歴パネル全体を
     // 取り直して復元する(個々の行だけを元に戻すより、確実に正しい状態に戻せるため)。
     wrap.remove();
-    delete state.catalogCache[state.currentBookId];
     if (panelEl.children.length === 0) {
       panelEl.innerHTML = "<p class='meta'>まだ記録がありません。</p>";
     }
     try {
       await api(`/api/attempts/${a.id}`, { method: "DELETE" });
+      syncCatalogCache(state.currentBookId);
       refreshMetaOnly(problemId, metaEl);
     } catch (err) {
       showToast("削除に失敗しました");
@@ -1149,7 +1174,7 @@ async function changeHistoryRating(a, newRating, problemId, historyPanelEl, meta
       method: "PUT",
       body: JSON.stringify({ rating: newRating, mistake_type: a.mistake_type }),
     });
-    delete state.catalogCache[state.currentBookId];
+    syncCatalogCache(state.currentBookId);
     refreshMetaOnly(problemId, metaEl);
     showToast("評価を更新しました");
   } catch (err) {
@@ -1168,7 +1193,7 @@ async function saveHistoryMemo(a, memo, problemId, historyPanelEl, metaEl, textE
   renderHistoryText(textEl, a);
   try {
     await api(`/api/attempts/${a.id}/memo`, { method: "PUT", body: JSON.stringify({ memo }) });
-    delete state.catalogCache[state.currentBookId];
+    syncCatalogCache(state.currentBookId);
     showToast("メモを保存しました");
   } catch (err) {
     a.memo = prevMemo;

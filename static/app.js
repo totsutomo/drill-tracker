@@ -356,11 +356,17 @@ function renderTodayDoneSection() {
 }
 
 function renderTodayDoneRow(a) {
+  const wrap = document.createElement("div");
+  wrap.className = "problem-row-wrap";
+
   const row = document.createElement("div");
   row.className = "problem-row today-done-row";
 
+  const editPanel = document.createElement("div");
+  editPanel.className = "problem-history hidden";
+
   const info = document.createElement("div");
-  info.className = "problem-info";
+  info.className = "problem-info tappable";
   const num = document.createElement("div");
   num.className = "p-num";
   num.textContent = `${a.book_title || ""} ${a.section_name || ""} #${a.number}`;
@@ -372,6 +378,7 @@ function renderTodayDoneRow(a) {
   meta.textContent = bits.filter(Boolean).join(" ・ ");
   info.appendChild(num);
   info.appendChild(meta);
+  info.addEventListener("click", () => toggleTodayDoneEdit(a, editPanel));
 
   const badge = document.createElement("span");
   badge.className = "history-badge today-done-badge";
@@ -381,7 +388,89 @@ function renderTodayDoneRow(a) {
 
   row.appendChild(info);
   row.appendChild(badge);
-  return row;
+  wrap.appendChild(row);
+  wrap.appendChild(editPanel);
+  return wrap;
+}
+
+// 済み行をタップすると開く編集パネル(2026-09-16追加、とっつー要望: 済みセクションで
+// 評価を直し忘れやメモの付け足しをしたいのに別タブに行かないとできなかった)。
+// 新規APIは作らず、本棚タブの評価修正(削除→付け直し、main.pyのrecompute_problem_srsで
+// SRS自動再計算)とメモタブのインライン編集(PUT /api/attempts/{id}/memo)をそのまま流用する。
+function toggleTodayDoneEdit(a, panelEl) {
+  if (!panelEl.classList.contains("hidden")) {
+    panelEl.classList.add("hidden");
+    return;
+  }
+  panelEl.classList.remove("hidden");
+  renderTodayDoneEditPanel(a, panelEl);
+}
+
+function renderTodayDoneEditPanel(a, panelEl) {
+  panelEl.innerHTML = "";
+
+  const btnWrap = document.createElement("div");
+  btnWrap.className = "rate-buttons-inline";
+  for (let r = 1; r <= 5; r++) {
+    const btn = document.createElement("button");
+    btn.className = "rate-btn";
+    btn.dataset.rating = String(r);
+    btn.textContent = String(r);
+    btn.title = RATING_LABELS[r];
+    if (r === a.rating) btn.style.outline = "2px solid #fff";
+    btn.addEventListener("click", () => changeTodayDoneRating(a, r, panelEl));
+    btnWrap.appendChild(btn);
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "note-edit-textarea";
+  textarea.placeholder = "メモを追加・編集";
+  textarea.value = a.memo || "";
+
+  const actions = document.createElement("div");
+  actions.className = "note-edit-actions";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "note-edit-save";
+  saveBtn.textContent = "メモを保存";
+  saveBtn.addEventListener("click", () => saveTodayDoneMemo(a, textarea.value.trim(), panelEl));
+  actions.appendChild(saveBtn);
+
+  panelEl.appendChild(btnWrap);
+  panelEl.appendChild(textarea);
+  panelEl.appendChild(actions);
+}
+
+// 評価ボタンの並び順定義(1〜5)そのものを流用しているため、番号自体は変わらない。
+// 5<=3のときだけmistake_typeを引き継ぐのは既存の評価モーダルと同じ仕様。
+async function changeTodayDoneRating(a, newRating, panelEl) {
+  if (newRating === a.rating) return;
+  try {
+    await api(`/api/attempts/${a.attempt_id}`, { method: "DELETE" });
+    const created = await submitAttempt(a, newRating, {
+      memo: a.memo,
+      mistakeType: newRating <= 3 ? a.mistake_type : null,
+    });
+    a.attempt_id = created.id;
+    a.rating = newRating;
+    a.mistake_type = newRating <= 3 ? a.mistake_type : null;
+    a.created_at = created.created_at;
+    renderTodayDoneSection();
+    showToast("評価を更新しました");
+  } catch (err) {
+    showToast("更新に失敗しました。もう一度お試しください");
+  }
+}
+
+async function saveTodayDoneMemo(a, memo, panelEl) {
+  try {
+    await api(`/api/attempts/${a.attempt_id}/memo`, { method: "PUT", body: JSON.stringify({ memo }) });
+    a.memo = memo || null;
+    renderTodayDoneSection();
+    showToast("メモを保存しました");
+  } catch (err) {
+    showToast("保存に失敗しました。もう一度お試しください");
+  }
 }
 
 document.getElementById("today-done-toggle").addEventListener("click", () => {

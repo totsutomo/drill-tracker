@@ -50,17 +50,71 @@ def _get_setting(conn, key: str, default: Optional[str] = None) -> Optional[str]
     return row[0] if row else default
 
 
-def _compute_streak(conn, today: str) -> int:
+def _solved_dates(conn) -> set:
     # 「実際に解いた」日だけを数える(source='solve')。importの過去データや
     # seedの一括自己申告はアプリを使い続けている実感=ストリークには含めない
     rows = conn.execute("SELECT DISTINCT local_date FROM attempts WHERE source = 'solve'").fetchall()
-    solved_dates = {r[0] for r in rows}
+    return {r[0] for r in rows}
+
+
+def _freeze_dates(conn) -> set:
+    rows = conn.execute("SELECT date FROM streak_freezes").fetchall()
+    return {r[0] for r in rows}
+
+
+def _streak_ending_at(end_date: str, covered_dates: set) -> int:
     streak = 0
-    cursor_date = today
-    while cursor_date in solved_dates:
+    cursor_date = end_date
+    while cursor_date in covered_dates:
         streak += 1
         cursor_date = add_days(cursor_date, -1)
     return streak
+
+
+def _compute_streak(conn, today: str) -> int:
+    covered = _solved_dates(conn) | _freeze_dates(conn)
+    return _streak_ending_at(today, covered)
+
+
+STREAK_FREEZE_MILESTONE_STEP = 7
+STREAK_FREEZE_BALANCE_CAP = 2
+
+
+def _streak_freeze_balance(conn) -> int:
+    milestone = int(_get_setting(conn, "streak_freeze_milestone", "0") or "0")
+    earned = milestone // STREAK_FREEZE_MILESTONE_STEP
+    used = conn.execute("SELECT COUNT(*) FROM streak_freezes").fetchone()[0]
+    return max(0, earned - used)
+
+
+# never miss twiceの自動版(2026-09-19)。昨日1日だけ欠けていて、それまでに7日以上の
+# 連続実績がありフリーズ残高が残っていれば自動消費して継続扱いにする。あわせて現在の
+# ストリークが新しい7の倍数に到達していれば(残高が上限未満なら)フリーズを1個貯める。
+# べき等: 同じ状態で何度呼んでも結果は変わらない(streak_freezes.dateがPRIMARY KEYのため
+# 同じ日を二重に消費することはない)。/api/stats/overviewのリクエストごとに呼ぶ想定
+def _settle_streak_freeze(conn, today: str) -> None:
+    solved = _solved_dates(conn)
+    freezes = _freeze_dates(conn)
+
+    yesterday = add_days(today, -1)
+    if yesterday not in solved and yesterday not in freezes:
+        streak_before_gap = _streak_ending_at(add_days(yesterday, -1), solved | freezes)
+        if streak_before_gap >= STREAK_FREEZE_MILESTONE_STEP and _streak_freeze_balance(conn) >= 1:
+            conn.execute("INSERT INTO streak_freezes (date) VALUES (?)", (yesterday,))
+            conn.commit()
+
+    current_streak = _compute_streak(conn, today)
+    milestone = int(_get_setting(conn, "streak_freeze_milestone", "0") or "0")
+    # whileにしているのは、settleがしばらく呼ばれない間に複数の節目(7,14...)を一度に
+    # 追い越していても、呼ばれた時点でまとめて追いつけるようにするため
+    while current_streak >= milestone + STREAK_FREEZE_MILESTONE_STEP and _streak_freeze_balance(conn) < STREAK_FREEZE_BALANCE_CAP:
+        milestone += STREAK_FREEZE_MILESTONE_STEP
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('streak_freeze_milestone', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(milestone),),
+        )
+        conn.commit()
 
 
 # ---------- books / catalog ----------
@@ -416,6 +470,7 @@ def queue_today(date: str):
     """dateは必ずクライアントのローカル日付(YYYY-MM-DD)。サーバーのUTC時計とNZ現地日付の
     ズレを避けるため、サーバー側では絶対に「今日」を計算しない(study-trackerの教訓#65と同種)。"""
     conn = get_connection()
+    _settle_streak_freeze(conn, date)
     daily_target = int(_get_setting(conn, "daily_target", "8"))
 
     solved_today = conn.execute(
@@ -649,7 +704,9 @@ def list_mistake_types():
 @app.get("/api/stats/overview")
 def stats_overview(date: str):
     conn = get_connection()
+    _settle_streak_freeze(conn, date)
     streak = _compute_streak(conn, date)
+    streak_freeze_balance = _streak_freeze_balance(conn)
 
     books = rows_to_dicts(conn.execute("SELECT * FROM books ORDER BY sort_order, id"))
     for book in books:
@@ -707,6 +764,7 @@ def stats_overview(date: str):
     conn.close()
     return {
         "streak_days": streak,
+        "streak_freeze_balance": streak_freeze_balance,
         "books": books,
         "exam_target_date": exam_target_date,
         "days_left": days_left,

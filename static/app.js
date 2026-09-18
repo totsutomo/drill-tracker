@@ -1400,6 +1400,10 @@ async function loadStats() {
 function renderStats(data) {
   document.getElementById("stats-streak-num").textContent = data.streak_days;
   document.getElementById("header-streak-num").textContent = data.streak_days;
+  const freezeBadge = document.getElementById("header-streak-freeze");
+  const freezeBalance = data.streak_freeze_balance || 0;
+  freezeBadge.classList.toggle("hidden", freezeBalance <= 0);
+  freezeBadge.textContent = "🧊".repeat(Math.min(freezeBalance, 2));
   const paceEl = document.getElementById("stats-pace-text");
   if (data.exam_target_date && data.days_left != null) {
     paceEl.textContent =

@@ -95,6 +95,13 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- ストリーク・フリーズ(never miss twiceの自動版、2026-09-19)で「欠けた日を継続扱いにした」
+-- 日付だけを記録する。残高はsettings.streak_freeze_milestone(7日ごとに+1相当、上限2個)から
+-- このテーブルの件数を引いて算出する(main.py _settle_streak_freeze参照)
+CREATE TABLE IF NOT EXISTS streak_freezes (
+    date TEXT PRIMARY KEY
+);
 """
 
 DEFAULT_MISTAKE_TYPES = ("符号ミス", "公式忘れ", "計算ミス", "方針が立たない", "読み間違い", "その他")

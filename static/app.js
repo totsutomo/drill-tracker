@@ -250,6 +250,14 @@ function formatLocalDate(d) {
 }
 function todayStr() { return formatLocalDate(new Date()); }
 
+// study-tracker(Compass)側のlogged_atと同じ"YYYY-MM-DD HH:MM:SS"形式・端末ローカル時刻
+// (vocab-appのstudyTrackerSync.ts、study-tracker app.jsのnowLocalTimestampと同方針)
+function nowLocalTimestamp() {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
 function newClientId() {
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
   return "cid-" + Date.now() + "-" + Math.random().toString(16).slice(2);
@@ -327,7 +335,23 @@ async function submitAttempt(problem, rating, { memo = null, mistakeType = null 
     memo,
     mistake_type: mistakeType,
   };
-  return api("/api/attempts", { method: "POST", body: JSON.stringify(payload) });
+  const result = await api("/api/attempts", { method: "POST", body: JSON.stringify(payload) });
+  syncAttemptToStudyTracker();
+  return result;
+}
+
+// Compass(study-tracker、別オリジン)へこのattemptを自動記録。ベストエフォートで、
+// 失敗してもUIには一切影響させない(vocab-appのsyncStudySessionと同方針、2026-09-19)。
+function syncAttemptToStudyTracker() {
+  const config = window.DRILL_SYNC_CONFIG;
+  if (!config || !config.studyTrackerUrl || !config.studyTrackerToken) return;
+  const url = `${config.studyTrackerUrl}/api/study-logs/drill-sync?token=${encodeURIComponent(config.studyTrackerToken)}`;
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ count: 1, logged_at: nowLocalTimestamp() }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 // ---------- 今日タブ ----------

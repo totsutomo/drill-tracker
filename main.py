@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 from datetime import date as dtdate
@@ -6,7 +7,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -22,6 +23,12 @@ from database import (
 app = FastAPI(title="Drill")
 
 init_db()
+
+# study-tracker(Compass、別オリジン)へattempt実績を自動記録するための設定。
+# 未設定の環境ではconfig.jsが空値を返しapp.js側がサイレントに何もしない
+# (vocab-appのstudyTrackerSync.tsと同方針、2026-09-19)。
+STUDY_TRACKER_URL = os.environ.get("STUDY_TRACKER_URL", "https://study-tracker-x6zf.onrender.com")
+STUDY_TRACKER_SYNC_TOKEN = os.environ.get("STUDY_TRACKER_SYNC_TOKEN")
 
 
 def _load_last_updated() -> str:
@@ -853,3 +860,12 @@ def manifest():
 @app.get("/service-worker.js")
 def service_worker():
     return FileResponse("static/service-worker.js", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/config.js")
+def config_js():
+    # env var駆動でstudy-tracker連携トークンをクライアントJSへ渡す。gitにトークンを
+    # 直書きしないための橋渡しで、値自体はどのみちブラウザから見える前提(vocab-app方式と同じ)。
+    config = {"studyTrackerUrl": STUDY_TRACKER_URL, "studyTrackerToken": STUDY_TRACKER_SYNC_TOKEN}
+    body = f"window.DRILL_SYNC_CONFIG = {json.dumps(config)};"
+    return Response(content=body, media_type="application/javascript", headers={"Cache-Control": "no-cache"})

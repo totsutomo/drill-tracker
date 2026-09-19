@@ -390,12 +390,18 @@ function getTodayRowEl(problemId) {
 }
 
 function renderTodayRow(problem) {
+  const wrap = document.createElement("div");
+  wrap.className = "problem-row-wrap";
+
   const row = document.createElement("div");
   row.className = "problem-row";
   row.dataset.problemId = problem.id;
 
+  const historyPanel = document.createElement("div");
+  historyPanel.className = "problem-history hidden";
+
   const info = document.createElement("div");
-  info.className = "problem-info";
+  info.className = "problem-info tappable";
   const num = document.createElement("div");
   num.className = "p-num";
   num.textContent = `${problem.book_title || ""} ${problem.section_name || ""} #${problem.number}`;
@@ -404,6 +410,9 @@ function renderTodayRow(problem) {
   meta.textContent = problem.unit_name || "";
   info.appendChild(num);
   info.appendChild(meta);
+  // 本棚タブの履歴パネルをそのまま流用(過去の評価履歴を見たいだけで、
+  // metaに表示中の単元名を上書きされたくないのでmetaElはnullで渡す)。
+  info.addEventListener("click", () => toggleProblemHistory(problem.id, historyPanel, null));
 
   const btnWrap = document.createElement("div");
   btnWrap.className = "rate-buttons-inline";
@@ -428,7 +437,9 @@ function renderTodayRow(problem) {
   row.appendChild(btnWrap);
   row.appendChild(memoBtn);
   row.appendChild(starBtn);
-  return row;
+  wrap.appendChild(row);
+  wrap.appendChild(historyPanel);
+  return wrap;
 }
 
 // 重要マークのトグルボタン(今日タブのキュー行・本棚タブの問題行で共通利用、2026-09-16追加)。
@@ -466,16 +477,21 @@ function createStarButton(problem, onSynced) {
   return btn;
 }
 
-// 今日タブでの評価送信の共通処理(番号ボタンの即時評価・メモ付きモーダルの両方から呼ぶ)。
-// 「やった問題」はリストから消すのではなく、下の済みセクションへ動かして評価バッジ付きで残す
-// (2026-09-08、とっつー要望: 消えるとモチベが下がる/今日何をどう評価したか後から見えない)。
-// DOM操作は必ずこの関数の中で「送信前」に同期的に行う(=optimistic)。
-// awaitの後まで特定のrow要素への参照を持ち越さないことが、上のgetTodayRowEl注記のバグ修正の要。
-async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = null } = {}) {
-  let ok = true;
+// 新規solve1件ぶんを「済み」エントリとしてstate.todayへ積む共通処理。今日タブ自身の評価
+// (recordTodayAttempt)だけでなく、本棚タブでの評価からも呼ぶ(2026-09-19、とっつー要望:
+// 本棚で評価しても今日タブの済みセクションに開き直すまで反映されなかったのを直す)。
+// state.todayはタブが非表示でも常にメモリ上に保持されているので、今日タブを開いていなくても
+// ここで更新しておけば、あとでタブを開いた瞬間から最新の状態が見える。
+function addSolveToTodayState(problem, rating, { memo = null, mistakeType = null } = {}) {
+  if (!state.today) return null;
+  // 本棚タブから評価した問題が、たまたま今日のキューにも並んでいることがある。
+  // state.today.queueから外すだけだとDOM側(今日タブの行)が消えないまま残るため、
+  // ここでキュー行の要素も一緒に片付ける(今日タブ自身からの評価でも同じ経路を通る)。
+  const rowEl = getTodayRowEl(problem.id);
+  if (rowEl) (rowEl.closest(".problem-row-wrap") || rowEl).remove();
   // 「済み」に積むエントリはここで1回だけ作り、後で送信が成功した時にattempt_idを
-  // 直接このオブジェクトへ書き戻す(配列のインデックスで探すと、連続してキーボードで
-  // 評価した時に別の問題のエントリを誤って書き換えかねないため参照で持つ)。
+  // 直接このオブジェクトへ書き戻す(配列のインデックスで探すと、連続で評価した時に
+  // 別の問題のエントリを誤って書き換えかねないため参照で持つ)。
   const entry = {
     ...problem,
     rating,
@@ -484,17 +500,33 @@ async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = 
     created_at: new Date().toISOString(),
     attempt_id: null,
   };
+  state.today.queue = state.today.queue.filter((p) => p.id !== problem.id);
+  state.today.solved_today++;
+  state.today.done_today = [entry, ...(state.today.done_today || [])];
+  return entry;
+}
+
+// 上のstate更新を画面に反映する。今日タブが非表示でもDOM要素自体は常に存在する
+// (タブ切り替えはCSSのactiveクラス付け替えのみ)ので、呼んでおいて問題ない。
+function rerenderTodayAfterStateChange() {
+  if (!state.today) return;
+  renderQuotaOnly();
+  renderTodayDoneSection();
+  document.getElementById("today-empty").classList.toggle("hidden", state.today.queue.length > 0);
+}
+
+// 今日タブでの評価送信の共通処理(番号ボタンの即時評価・メモ付きモーダルの両方から呼ぶ)。
+// 「やった問題」はリストから消すのではなく、下の済みセクションへ動かして評価バッジ付きで残す
+// (2026-09-08、とっつー要望: 消えるとモチベが下がる/今日何をどう評価したか後から見えない)。
+// DOM操作は必ずこの関数の中で「送信前」に同期的に行う(=optimistic)。
+// awaitの後まで特定のrow要素への参照を持ち越さないことが、上のgetTodayRowEl注記のバグ修正の要。
+async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = null } = {}) {
+  let ok = true;
+  let entry;
   await optimistic(
     () => {
-      const rowEl = getTodayRowEl(problem.id);
-      if (rowEl) rowEl.remove();
-      if (!state.today) return;
-      state.today.queue = state.today.queue.filter((p) => p.id !== problem.id);
-      state.today.solved_today++;
-      state.today.done_today = [entry, ...(state.today.done_today || [])];
-      renderQuotaOnly();
-      renderTodayDoneSection();
-      document.getElementById("today-empty").classList.toggle("hidden", state.today.queue.length > 0);
+      entry = addSolveToTodayState(problem, rating, { memo, mistakeType });
+      rerenderTodayAfterStateChange();
     },
     () => {
       // 失敗時はローカルの見込みを信用せず、サーバーの状態を取り直して確実に整合させる
@@ -891,7 +923,7 @@ function renderBookshelfRow(problem, book) {
   wrap.className = "problem-row-wrap";
 
   const row = document.createElement("div");
-  row.className = "problem-row" + (problem.retired_at ? " retired" : "");
+  row.className = "problem-row problem-row-book" + (problem.retired_at ? " retired" : "");
   row.dataset.problemId = problem.id;
 
   const historyPanel = document.createElement("div");
@@ -946,12 +978,21 @@ function renderBookshelfRow(problem, book) {
         srs_graduated: problem.srs_graduated,
       };
       applyRatingPreview(r);
+      // 今日タブが裏で開いていなくても「済み」件数へ即反映する(2026-09-19)。
+      const todayEntry = addSolveToTodayState(namedProblem, r);
+      if (todayEntry) rerenderTodayAfterStateChange();
       try {
-        await submitAttempt(namedProblem, r);
+        const created = await submitAttempt(namedProblem, r);
+        if (todayEntry) {
+          todayEntry.attempt_id = created.id;
+          syncTodayCache();
+        }
         syncCatalogCache(book.id);
       } catch (err) {
         Object.assign(problem, prevFields);
         meta.textContent = prevMeta;
+        // 今日タブ側は個別に巻き戻さず、サーバーの状態を取り直して整合させる
+        if (todayEntry) loadToday();
         showToast("保存に失敗しました。もう一度お試しください");
       }
     });
@@ -972,13 +1013,20 @@ function renderBookshelfRow(problem, book) {
           srs_graduated: problem.srs_graduated,
         };
         applyRatingPreview(rating);
+        const todayEntry = addSolveToTodayState(namedProblem, rating, opts);
+        if (todayEntry) rerenderTodayAfterStateChange();
         try {
-          await submitAttempt(p, rating, opts);
+          const created = await submitAttempt(p, rating, opts);
+          if (todayEntry) {
+            todayEntry.attempt_id = created.id;
+            syncTodayCache();
+          }
           syncCatalogCache(book.id);
           showToast("記録しました");
         } catch (err) {
           Object.assign(problem, prevFields);
           meta.textContent = prevMeta;
+          if (todayEntry) loadToday();
           showToast("保存に失敗しました。もう一度お試しください");
         }
       },
@@ -1737,6 +1785,10 @@ document.addEventListener("keydown", (e) => {
 async function init() {
   state.mistakeTypes = await api("/api/mistake-types").catch(() => []);
   await loadToday();
+  // 統計タブは従来「タブを開いた時だけ」読み込んでいたため、今日タブなどで数分過ごしてから
+  // 統計タブを開くと毎回そこで待たされていた。起動直後の今日タブ表示をブロックしないよう
+  // awaitはせず、裏で先に読み込んでキャッシュを温めておく(2026-09-19、とっつー要望)。
+  loadStats().catch(() => {});
 
   try {
     if (!localStorage.getItem("drill_onboarding_seen")) {

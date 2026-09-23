@@ -701,7 +701,7 @@ function renderTodayDoneEditPanel(a, panelEl) {
 }
 
 // 評価ボタンの並び順定義(1〜5)そのものを流用しているため、番号自体は変わらない。
-// 5<=3のときだけmistake_typeを引き継ぐのは既存の評価モーダルと同じ仕様。
+// mistake_typeは評価に関わらず維持する(2026-09-23、既存の評価モーダルと同じ方針に統一)。
 // 2026-09-16: 楽観的更新に統一する方針のため、先にaを書き換えて再描画してから
 // 裏でDELETE→POSTを送る(失敗時だけ元に戻す)。ここは「既存の評価を書き換える」操作で
 // 「追加前のstreak」を復元できないため、本棚の新規評価ボタンと違って次回予定日の
@@ -710,7 +710,6 @@ async function changeTodayDoneRating(a, newRating, panelEl) {
   if (newRating === a.rating) return;
   const prev = { attempt_id: a.attempt_id, rating: a.rating, mistake_type: a.mistake_type, created_at: a.created_at };
   a.rating = newRating;
-  a.mistake_type = newRating <= 3 ? a.mistake_type : null;
   renderTodayDoneSection();
   try {
     await api(`/api/attempts/${prev.attempt_id}`, { method: "DELETE" });
@@ -771,6 +770,9 @@ function openRateModal(problem, { onSubmit } = {}) {
     btnWrap.appendChild(btn);
   }
   renderMistakeChips();
+  // 良好/即答でもミスの種類を残したいケースがある(例: 解けたが非効率な方針だった)ため、
+  // 評価に関わらず常時表示する(2026-09-23、とっつー要望)
+  document.getElementById("rate-modal-mistake").classList.remove("hidden");
   document.getElementById("rate-modal-memo").value = "";
   document.getElementById("rate-modal").classList.remove("hidden");
 }
@@ -780,7 +782,6 @@ function selectRateModalRating(rating) {
   document.querySelectorAll("#rate-modal-buttons .rate-btn").forEach((b) => {
     b.style.outline = Number(b.dataset.rating) === rating ? "2px solid #fff" : "none";
   });
-  document.getElementById("rate-modal-mistake").classList.toggle("hidden", rating > 3);
 }
 
 function renderMistakeChips() {
@@ -805,15 +806,6 @@ document.getElementById("rate-modal-cancel").addEventListener("click", () => {
   rateModalCtx = null;
 });
 
-// メモ欄にフォーカスがある間、下のPC用ショートカット(isTypingTarget判定で無効化される)の
-// 代わりにEnter=記録・Shift+Enter=改行にする(2026-09-16、とっつー要望)。
-document.getElementById("rate-modal-memo").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    document.getElementById("rate-modal-submit").click();
-  }
-});
-
 document.getElementById("rate-modal-submit").addEventListener("click", async () => {
   if (!rateModalCtx || !rateModalCtx.rating) {
     showToast("評価を選んでください");
@@ -823,7 +815,7 @@ document.getElementById("rate-modal-submit").addEventListener("click", async () 
   const memo = document.getElementById("rate-modal-memo").value.trim() || null;
   document.getElementById("rate-modal").classList.add("hidden");
   rateModalCtx = null;
-  await onSubmit(problem, rating, { memo, mistakeType: rating <= 3 ? mistakeType : null });
+  await onSubmit(problem, rating, { memo, mistakeType });
 });
 
 // ---------- 本棚タブ ----------
@@ -1236,7 +1228,6 @@ async function changeHistoryRating(a, newRating, problemId, historyPanelEl, meta
   if (newRating === a.rating) return;
   const prev = { rating: a.rating, mistake_type: a.mistake_type };
   a.rating = newRating;
-  a.mistake_type = newRating <= 3 ? a.mistake_type : null;
   badgeEl.style.background = `var(--rate-${a.rating})`;
   badgeEl.textContent = a.rating;
   renderHistoryText(textEl, a);
@@ -1739,20 +1730,37 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  if (isTypingTarget(e.target)) return;
-
-  // 評価モーダルが開いている間: 1-5で評価選択、Enterで記録、Escでキャンセル
+  // 評価モーダルが開いている間: 1-5で評価選択、Enterで記録、Escでキャンセル。
+  // isTypingTarget判定より前に置く(メモ欄やチップ等どこにフォーカスがあっても効くように)。
+  // Enterはe.preventDefault()して、フォーカスがボタンにある場合のブラウザ標準の
+  // Enter→click発火(rateModalCtxが既にnull化された後に発火し例外になる)を防ぐ
+  // (2026-09-23、とっつー報告: 評価を押した直後のEnterでセーブされない不具合の修正)。
   const rateModal = document.getElementById("rate-modal");
   if (!rateModal.classList.contains("hidden")) {
+    const memoFocused = e.target && e.target.id === "rate-modal-memo";
+    if (memoFocused) {
+      // IME変換確定のEnter(e.isComposing)まで拾うと、変換中に誤って記録してしまうため除外。
+      // Shift+Enterは改行(テキストエリアの標準動作のまま素通しする)。
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        document.getElementById("rate-modal-submit").click();
+      }
+      return;
+    }
     if (e.key >= "1" && e.key <= "5") {
+      e.preventDefault();
       selectRateModalRating(Number(e.key));
     } else if (e.key === "Enter") {
+      e.preventDefault();
       document.getElementById("rate-modal-submit").click();
     } else if (e.key === "Escape") {
+      e.preventDefault();
       document.getElementById("rate-modal-cancel").click();
     }
     return;
   }
+
+  if (isTypingTarget(e.target)) return;
 
   // 設定ドロワーが開いている間: Escで閉じる
   if (settingsDrawer.classList.contains("open")) {

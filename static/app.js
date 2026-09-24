@@ -270,6 +270,9 @@ function newClientId() {
 // 実害はない(サーバーの計算結果を待って上書きすることはせず、ページを開き直せば正しい値になる
 // 程度の話)。ただし database.py の INTERVAL_DAYS / GRADUATED_INTERVAL_DAYS /
 // 卒業条件(streak>=2)を変更した時は、ここも必ず同じ値に直すこと。
+// 例外: database.py の FIRST_PASS_INTERVAL_DAYS(一周目が終わるまでの一時的な間隔延長、
+// 2026-09-24追加)はここには反映していない。この見込み値がその間だけ実際より短く出ることが
+// あるが、実際の記録直後に本物の値へ上書きされるため実害はない(意図的な未対応)。
 const SRS_INTERVAL_DAYS_PREVIEW = { 1: 1, 2: 2, 3: 4, 4: 8, 5: 15 };
 const SRS_GRADUATED_INTERVAL_DAYS_PREVIEW = 60;
 

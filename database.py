@@ -116,6 +116,13 @@ DEFAULT_SETTINGS = {
 INTERVAL_DAYS = {1: 1, 2: 2, 3: 4, 4: 8, 5: 15}
 GRADUATED_INTERVAL_DAYS = 60
 
+# 一周目(カタログ全問題への初回着手)が終わるまでの一時的な間隔(2026-09-24、とっつー要望)。
+# 間違えた問題がすぐ復習キューの先頭に戻ってきて新規問題の出題枠を食い、解き方を覚えて
+# しまうだけの実践的でない練習になっていた。一周目が終わっていない間はこちらを使い、
+# 一周目が完了(全問題に1回は着手済み)した時点でINTERVAL_DAYSに自動で戻る
+# (is_first_pass_in_progress/compute_next_srs_state参照)。
+FIRST_PASS_INTERVAL_DAYS = {1: 3, 2: 5, 3: 7, 4: 10, 5: 15}
+
 
 # study-trackerと同じ理由: リクエストのたびに(特にTursoのようなリモートDBへ)新規接続を
 # 張ると往復のたびに接続確立のコストがかかる。FastAPIの同期routeはスレッドプールで
@@ -226,17 +233,33 @@ def add_days(local_date: str, days: int) -> str:
     return (d + timedelta(days=days)).isoformat()
 
 
-def compute_next_srs_state(prior_streak: int, rating: int, source: str = "solve"):
+def is_first_pass_in_progress(conn) -> bool:
+    """一周目(カタログ全問題への初回着手)がまだ終わっていないか。queue_todayの出題対象
+    (retire済み・EXERCISEセクションを除く)のうち、1件でも未着手の問題が残っていればTrue。"""
+    row = conn.execute(
+        "SELECT 1 FROM problems p JOIN sections s ON p.section_id = s.id "
+        "WHERE p.retired_at IS NULL AND s.name != 'EXERCISE' "
+        "AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.problem_id = p.id) LIMIT 1"
+    ).fetchone()
+    return row is not None
+
+
+def compute_next_srs_state(prior_streak: int, rating: int, source: str = "solve", first_pass_mode: bool = False):
     """評価1件を反映した後のstreak/graduated/次回までの日数を返す。
     (新streak, 新graduated, 次回までの日数)
     source='seed'(7.5章の単元一括自己申告)は実際に解いた確認ではないため、
-    rating>=4でも卒業ロジックのstreakには一切寄与させない。"""
+    rating>=4でも卒業ロジックのstreakには一切寄与させない。
+    first_pass_mode=Trueの間はFIRST_PASS_INTERVAL_DAYSを使う(is_first_pass_in_progress参照)。"""
     if source == "seed":
         new_streak = 0
     else:
         new_streak = prior_streak + 1 if rating >= 4 else 0
     new_graduated = 1 if new_streak >= 2 else 0
-    interval = GRADUATED_INTERVAL_DAYS if new_graduated else INTERVAL_DAYS[rating]
+    if new_graduated:
+        interval = GRADUATED_INTERVAL_DAYS
+    else:
+        interval_table = FIRST_PASS_INTERVAL_DAYS if first_pass_mode else INTERVAL_DAYS
+        interval = interval_table[rating]
     return new_streak, new_graduated, interval
 
 
@@ -258,10 +281,11 @@ def recompute_problem_srs(conn, problem_id: int):
         )
         return
 
+    first_pass_mode = is_first_pass_in_progress(conn)
     streak, graduated = 0, 0
     last_rating, next_due = None, None
     for rating, local_date, source in rows:
-        streak, graduated, interval = compute_next_srs_state(streak, rating, source)
+        streak, graduated, interval = compute_next_srs_state(streak, rating, source, first_pass_mode)
         last_rating = rating
         next_due = add_days(local_date, interval)
 

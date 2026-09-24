@@ -465,6 +465,34 @@ def toggle_star(problem_id: int):
 
 # ---------- 今日のキュー ----------
 
+PROBLEM_DISPLAY_COLS = (
+    "p.*, b.id AS book_id, b.title AS book_title, s.name AS section_name, "
+    "c.name AS chapter_name, u.name AS unit_name"
+)
+PROBLEM_DISPLAY_JOINS = (
+    "JOIN sections s ON p.section_id = s.id "
+    "JOIN books b ON s.book_id = b.id "
+    "JOIN units u ON p.unit_id = u.id "
+    "JOIN chapters c ON u.chapter_id = c.id"
+)
+
+
+def _solved_on_date(conn, date: str):
+    """指定日(クライアントのローカル日付)に解いた問題の一覧(evaluation付き)。
+    queue_todayの「今日の済み」と、過去日を遡って見る/api/attempts/by-dateの両方から
+    呼ぶ共通処理(2026-09-24、履歴閲覧機能追加時に切り出し)。"""
+    return rows_to_dicts(
+        conn.execute(
+            f"SELECT a.id AS attempt_id, a.rating AS rating, a.memo AS memo, "
+            f"a.mistake_type AS mistake_type, a.created_at AS created_at, {PROBLEM_DISPLAY_COLS} "
+            f"FROM attempts a JOIN problems p ON a.problem_id = p.id {PROBLEM_DISPLAY_JOINS} "
+            "WHERE a.source = 'solve' AND a.local_date = ? "
+            "ORDER BY a.created_at DESC, a.id DESC",
+            (date,),
+        )
+    )
+
+
 @app.get("/api/queue/today")
 def queue_today(date: str):
     """dateは必ずクライアントのローカル日付(YYYY-MM-DD)。サーバーのUTC時計とNZ現地日付の
@@ -484,22 +512,11 @@ def queue_today(date: str):
         (date,),
     ).fetchone()[0]
 
-    problem_display_cols = (
-        "p.*, b.id AS book_id, b.title AS book_title, s.name AS section_name, "
-        "c.name AS chapter_name, u.name AS unit_name"
-    )
-    problem_display_joins = (
-        "JOIN sections s ON p.section_id = s.id "
-        "JOIN books b ON s.book_id = b.id "
-        "JOIN units u ON p.unit_id = u.id "
-        "JOIN chapters c ON u.chapter_id = c.id"
-    )
-
     # 2026-09-08: とりあえずEXERCISEセクションは今日の出題対象から除外(とっつー要望)。
     # 恒久的に外すのか設定で切り替えたいのかは未確定なので、いったんハードコードで絞る。
     review_queue = rows_to_dicts(
         conn.execute(
-            f"SELECT {problem_display_cols} FROM problems p {problem_display_joins} "
+            f"SELECT {PROBLEM_DISPLAY_COLS} FROM problems p {PROBLEM_DISPLAY_JOINS} "
             "WHERE p.retired_at IS NULL AND s.name != 'EXERCISE' "
             "AND p.srs_next_due_date IS NOT NULL AND p.srs_next_due_date <= ? "
             "ORDER BY p.srs_last_rating ASC, p.srs_next_due_date ASC, p.catalog_order ASC "
@@ -514,7 +531,7 @@ def queue_today(date: str):
     if remaining > 0:
         new_queue = rows_to_dicts(
             conn.execute(
-                f"SELECT {problem_display_cols} FROM problems p {problem_display_joins} "
+                f"SELECT {PROBLEM_DISPLAY_COLS} FROM problems p {PROBLEM_DISPLAY_JOINS} "
                 "WHERE p.retired_at IS NULL AND s.name != 'EXERCISE' "
                 "AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.problem_id = p.id) "
                 "ORDER BY p.catalog_order ASC LIMIT ?",
@@ -525,16 +542,7 @@ def queue_today(date: str):
 
     # 今日すでに解いた問題(evaluation付き)。キューから消すのではなく「済み」として
     # 別グループで見せ続けるための一覧(2026-09-08、とっつー要望: 消すとモチベが下がる)。
-    done_today = rows_to_dicts(
-        conn.execute(
-            f"SELECT a.id AS attempt_id, a.rating AS rating, a.memo AS memo, "
-            f"a.mistake_type AS mistake_type, a.created_at AS created_at, {problem_display_cols} "
-            f"FROM attempts a JOIN problems p ON a.problem_id = p.id {problem_display_joins} "
-            "WHERE a.source = 'solve' AND a.local_date = ? "
-            "ORDER BY a.created_at DESC, a.id DESC",
-            (date,),
-        )
-    )
+    done_today = _solved_on_date(conn, date)
 
     conn.close()
     return {
@@ -547,6 +555,18 @@ def queue_today(date: str):
         "queue": queue,
         "done_today": done_today,
     }
+
+
+@app.get("/api/attempts/by-date")
+def attempts_by_date(date: str):
+    """指定した過去日(クライアントのローカル日付)に解いた問題の一覧。今日タブの「済み」と
+    同じデータを任意の日付で見るための専用エンドポイント(2026-09-24追加。「昨日どこまで
+    やったか確認できない」というとっつー要望。今日タブはstate.today前提の楽観的更新・undo
+    ロジックと密結合しているため、過去日の一覧は流用せず読み取り専用の別経路にした)。"""
+    conn = get_connection()
+    solved = _solved_on_date(conn, date)
+    conn.close()
+    return {"date": date, "solved_count": len(solved), "entries": solved}
 
 
 # ---------- メモ・見返し ----------

@@ -79,6 +79,18 @@ body {
 .tab-btn.active { color: var(--accent); font-weight: 600; }
 
 /* 今日タブ */
+.today-date-nav {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  margin-bottom: 10px; position: relative;
+}
+.date-nav-btn {
+  background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+  width: 30px; height: 30px; border-radius: 50%; font-size: 16px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.date-nav-btn:disabled { opacity: 0.3; cursor: default; }
+.today-date-label { font-size: 14px; font-weight: 600; min-width: 84px; text-align: center; }
+#today-date-today-btn { position: absolute; right: 0; font-size: 12px; }
 .today-quota-card {
   background: var(--bg-card); border-radius: 14px; padding: 24px 16px; text-align: center;
   margin-bottom: 10px;

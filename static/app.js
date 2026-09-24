@@ -321,6 +321,7 @@ const state = {
   settings: {},
   catalogCache: {},
   currentBookId: null,
+  viewingDate: todayStr(),
 };
 
 // 本棚タブで開いている章(chapter.id)を覚えておく。renderCatalog()は評価のたびに
@@ -749,6 +750,106 @@ async function saveTodayDoneMemo(a, memo, panelEl) {
 document.getElementById("today-done-toggle").addEventListener("click", () => {
   todayDoneExpanded = !todayDoneExpanded;
   renderTodayDoneSection();
+});
+
+// ---------- 今日タブ: 過去日の履歴閲覧(2026-09-24追加) ----------
+// 「今日タブは今日の分だけ、メモタブはメモ付きの記録だけしか見えず、昨日どこまでやったか
+// 確認できない」というとっつー要望。今日タブ自体は評価ボタン・楽観的更新・Undoなど
+// state.today前提のロジックが密結合しているため、過去日はあえてそれらを一切再利用せず、
+// 読み取り専用の別ビュー(today-history-view)として実装する(誤って今日の状態を壊すリスクを避ける)。
+
+function formatDateNavLabel(dateStr) {
+  if (dateStr === todayStr()) return "今日";
+  const d = new Date(dateStr + "T00:00:00");
+  const weekday = ["日", "月", "火", "水", "木", "金", "土"][d.getDay()];
+  return `${d.getMonth() + 1}/${d.getDate()}(${weekday})`;
+}
+
+function renderDateNav() {
+  document.getElementById("today-date-label").textContent = formatDateNavLabel(state.viewingDate);
+  const isToday = state.viewingDate === todayStr();
+  document.getElementById("today-date-next").disabled = isToday;
+  document.getElementById("today-date-today-btn").classList.toggle("hidden", isToday);
+  document.getElementById("today-live-view").classList.toggle("hidden", !isToday);
+  document.getElementById("today-history-view").classList.toggle("hidden", isToday);
+}
+
+async function goToDate(dateStr) {
+  state.viewingDate = dateStr;
+  renderDateNav();
+  if (dateStr === todayStr()) {
+    if (!state.today) await loadToday();
+  } else {
+    await loadHistoryForDate(dateStr);
+  }
+}
+
+async function loadHistoryForDate(dateStr) {
+  await loadWithCache(`/api/attempts/by-date?date=${dateStr}`, (data) => {
+    // 連打でリクエストが前後した時、後から返ってきた古い日付のレスポンスで
+    // 今見ている日付の表示を上書きしないためのガード
+    if (state.viewingDate !== dateStr) return;
+    renderHistoryList(data);
+  });
+}
+
+function renderHistoryList(data) {
+  const list = document.getElementById("today-history-list");
+  list.innerHTML = "";
+  data.entries.forEach((a) => list.appendChild(renderHistoryRow(a)));
+  document.getElementById("today-history-empty").classList.toggle("hidden", data.entries.length > 0);
+}
+
+// renderTodayDoneRowとほぼ同じ見た目だが、タップ時に開くのは今日タブ専用の編集パネル
+// (state.today.done_today前提のchangeTodayDoneRating等)ではなく、本棚タブ等でも使っている
+// 汎用の問題履歴パネル(toggleProblemHistory、problem_id起点でstate.todayに依存しない)。
+function renderHistoryRow(a) {
+  const wrap = document.createElement("div");
+  wrap.className = "problem-row-wrap";
+
+  const row = document.createElement("div");
+  row.className = "problem-row";
+
+  const historyPanel = document.createElement("div");
+  historyPanel.className = "problem-history hidden";
+
+  const info = document.createElement("div");
+  info.className = "problem-info tappable";
+  const num = document.createElement("div");
+  num.className = "p-num";
+  num.textContent = `${a.book_title || ""} ${a.section_name || ""} #${a.number}`;
+  const meta = document.createElement("div");
+  meta.className = "p-meta";
+  const bits = [a.unit_name || ""];
+  if (a.mistake_type) bits.push(a.mistake_type);
+  if (a.memo) bits.push(a.memo);
+  meta.textContent = bits.filter(Boolean).join(" ・ ");
+  info.appendChild(num);
+  info.appendChild(meta);
+  info.addEventListener("click", () => toggleProblemHistory(a.id, historyPanel, null));
+
+  const badge = document.createElement("span");
+  badge.className = "history-badge today-done-badge";
+  badge.style.background = `var(--rate-${a.rating})`;
+  badge.title = RATING_LABELS[a.rating] || "";
+  badge.textContent = a.rating;
+
+  row.appendChild(info);
+  row.appendChild(badge);
+  wrap.appendChild(row);
+  wrap.appendChild(historyPanel);
+  return wrap;
+}
+
+document.getElementById("today-date-prev").addEventListener("click", () => {
+  goToDate(addDaysLocal(state.viewingDate, -1));
+});
+document.getElementById("today-date-next").addEventListener("click", () => {
+  if (state.viewingDate === todayStr()) return;
+  goToDate(addDaysLocal(state.viewingDate, 1));
+});
+document.getElementById("today-date-today-btn").addEventListener("click", () => {
+  goToDate(todayStr());
 });
 
 // ---------- 評価モーダル(本棚・今日タブの📝から共通利用) ----------
@@ -1796,6 +1897,7 @@ document.addEventListener("keydown", (e) => {
 async function init() {
   state.mistakeTypes = await api("/api/mistake-types").catch(() => []);
   await loadToday();
+  renderDateNav();
   // 統計タブは従来「タブを開いた時だけ」読み込んでいたため、今日タブなどで数分過ごしてから
   // 統計タブを開くと毎回そこで待たされていた。起動直後の今日タブ表示をブロックしないよう
   // awaitはせず、裏で先に読み込んでキャッシュを温めておく(2026-09-19、とっつー要望)。

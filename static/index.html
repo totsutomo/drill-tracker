@@ -41,22 +41,36 @@
 
     <!-- 今日 -->
     <section id="tab-today" class="tab-panel active">
-      <div class="today-quota-card">
-        <div class="quota-number"><span id="quota-solved">-</span><span class="quota-sep">/</span><span id="quota-target">-</span></div>
-        <div class="quota-label">今日の目標</div>
-        <div class="quota-achieved hidden" id="quota-achieved-msg">今日の目標達成</div>
+      <div class="today-date-nav">
+        <button type="button" id="today-date-prev" class="date-nav-btn" aria-label="前の日">‹</button>
+        <span id="today-date-label" class="today-date-label">今日</span>
+        <button type="button" id="today-date-next" class="date-nav-btn" aria-label="次の日" disabled>›</button>
+        <button type="button" id="today-date-today-btn" class="link-btn hidden">今日に戻る</button>
       </div>
-      <div class="overdue-badge" id="overdue-badge"></div>
-      <p class="kbd-hint"><kbd>1</kbd>〜<kbd>5</kbd> 一番上の問題を評価 / <kbd>M</kbd> メモ付きで評価 / <kbd>Z</kbd> 直前の評価を取り消す</p>
-      <div id="today-queue" class="problem-list"></div>
-      <div id="today-empty" class="empty-state hidden">今日の問題はありません。お疲れさま。</div>
 
-      <div id="today-done-section" class="today-done-section hidden">
-        <button type="button" id="today-done-toggle" class="today-done-toggle">
-          <span>済み (<span id="today-done-count">0</span>)</span>
-          <span class="today-done-chevron">▸</span>
-        </button>
-        <div id="today-done-list" class="problem-list hidden"></div>
+      <div id="today-live-view">
+        <div class="today-quota-card">
+          <div class="quota-number"><span id="quota-solved">-</span><span class="quota-sep">/</span><span id="quota-target">-</span></div>
+          <div class="quota-label">今日の目標</div>
+          <div class="quota-achieved hidden" id="quota-achieved-msg">今日の目標達成</div>
+        </div>
+        <div class="overdue-badge" id="overdue-badge"></div>
+        <p class="kbd-hint"><kbd>1</kbd>〜<kbd>5</kbd> 一番上の問題を評価 / <kbd>M</kbd> メモ付きで評価 / <kbd>Z</kbd> 直前の評価を取り消す</p>
+        <div id="today-queue" class="problem-list"></div>
+        <div id="today-empty" class="empty-state hidden">今日の問題はありません。お疲れさま。</div>
+
+        <div id="today-done-section" class="today-done-section hidden">
+          <button type="button" id="today-done-toggle" class="today-done-toggle">
+            <span>済み (<span id="today-done-count">0</span>)</span>
+            <span class="today-done-chevron">▸</span>
+          </button>
+          <div id="today-done-list" class="problem-list hidden"></div>
+        </div>
+      </div>
+
+      <div id="today-history-view" class="hidden">
+        <div id="today-history-list" class="problem-list"></div>
+        <div id="today-history-empty" class="empty-state hidden">この日の記録はありません。</div>
       </div>
     </section>
 

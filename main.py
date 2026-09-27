@@ -176,8 +176,14 @@ def get_book_catalog(book_id: int):
             units = rows_to_dicts(
                 conn.execute(f"SELECT * FROM units WHERE chapter_id IN ({ph2}) ORDER BY sort_order, id", chapter_ids)
             )
+        # attempt_count = 履歴パネルに並ぶ記録の件数(本棚の行に「3回」と出す、2026-09-27)。
+        # Tursoは往復ごとに時間がかかるので、別クエリにせず同じSELECTの中で数える
         problems = rows_to_dicts(
-            conn.execute(f"SELECT * FROM problems WHERE section_id IN ({ph}) ORDER BY catalog_order, id", section_ids)
+            conn.execute(
+                "SELECT p.*, (SELECT COUNT(*) FROM attempts a WHERE a.problem_id = p.id) AS attempt_count "
+                f"FROM problems p WHERE p.section_id IN ({ph}) ORDER BY p.catalog_order, p.id",
+                section_ids,
+            )
         )
     conn.close()
 

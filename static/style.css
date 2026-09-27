@@ -450,3 +450,31 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 .progress-track .pt-mastered { background: var(--rate-5); }
 /* 今日まだ解いていない間は炎を薄くする(昨日までの日数は保たれている合図) */
 .streak-chip.pending .streak-flame { opacity: .4; }
+
+/* PCでは左にサイドバー(2026-09-27)。タブを画面下から左へ移し、本文の上限を640px→880pxに広げる
+   (640pxはスマホ前提で最初に決めたままの値で、PCで広げない理由は特になかった)。
+   ヘッダー(設定・Drill・★・連続日数)はサイドバーの一番上に置く。スマホの見た目は変えない */
+.tab-icon { display: none; }
+@media (min-width: 900px) {
+  body { padding: 0 0 0 220px; }
+  .app-header {
+    position: fixed; top: 0; left: 0; width: 220px; height: 64px; z-index: 101; gap: 4px;
+    background: var(--bg-card); border-bottom: none; border-right: 1px solid var(--border); padding: 14px 10px 14px 8px;
+  }
+  .app-header h1 { min-width: 0; }
+  .streak-chip { flex-shrink: 0; white-space: nowrap; }
+  .tab-nav {
+    top: 64px; bottom: 0; width: 220px; flex-direction: column; gap: 4px;
+    border-top: none; border-right: 1px solid var(--border); padding: 10px;
+  }
+  .tab-btn {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 12px; text-align: left;
+    padding: 11px 14px; font-size: 14px; border-radius: 10px;
+  }
+  .tab-icon { display: block; width: 18px; height: 18px; flex-shrink: 0; }
+  .tab-btn:hover { background: var(--bg-elevated); }
+  .tab-btn.active { background: var(--accent-dim); color: var(--text); }
+  #app-main { max-width: 880px; padding: 24px 32px 40px; }
+  /* 下のタブがなくなる分、トーストは下寄せ・本文の中央に */
+  #toast-banner { bottom: 24px; left: calc(50% + 110px); }
+}

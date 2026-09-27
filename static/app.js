@@ -309,8 +309,10 @@ function previewSrsNextDue(priorStreak, rating, fromDate) {
   return { nextDue: addDaysLocal(fromDate, interval), streak: newStreak, graduated };
 }
 
-function formatSrsMeta(rating, nextDue, graduated) {
-  return `評価${rating} / 次回 ${nextDue}${graduated ? " / 卒業" : ""}(タップで履歴)`;
+// count = これまでの記録の件数(履歴パネルに並ぶ数)。何回つまずいた問題かを開かずに分かるようにする(2026-09-27)
+function formatSrsMeta(rating, nextDue, graduated, count) {
+  const times = count ? `${count}回 / ` : "";
+  return `${times}評価${rating} / 次回 ${nextDue}${graduated ? " / 卒業" : ""}(タップで履歴)`;
 }
 
 // ---------- アイコン(絵文字を使わず、アプリのトーンに合わせた線画SVGを共通定義) ----------
@@ -1230,7 +1232,7 @@ function renderBookshelfRow(problem, book) {
   const meta = document.createElement("div");
   meta.className = "p-meta";
   meta.textContent = problem.srs_last_rating
-    ? `評価${problem.srs_last_rating} / 次回 ${problem.srs_next_due_date}${problem.srs_graduated ? " / 卒業" : ""}(タップで履歴)`
+    ? formatSrsMeta(problem.srs_last_rating, problem.srs_next_due_date, problem.srs_graduated, problem.attempt_count)
     : "未着手";
   info.appendChild(num);
   info.appendChild(meta);
@@ -1249,7 +1251,8 @@ function renderBookshelfRow(problem, book) {
     problem.srs_next_due_date = preview.nextDue;
     problem.srs_streak = preview.streak;
     problem.srs_graduated = preview.graduated ? 1 : 0;
-    meta.textContent = formatSrsMeta(rating, preview.nextDue, preview.graduated);
+    problem.attempt_count = (problem.attempt_count || 0) + 1;
+    meta.textContent = formatSrsMeta(rating, preview.nextDue, preview.graduated, problem.attempt_count);
   }
 
   // 番号ボタン(メモなし)とメモ付きモーダルの共通処理。先にmeta表示・problemの状態・今日タブの
@@ -1261,6 +1264,7 @@ function renderBookshelfRow(problem, book) {
       srs_next_due_date: problem.srs_next_due_date,
       srs_streak: problem.srs_streak,
       srs_graduated: problem.srs_graduated,
+      attempt_count: problem.attempt_count,
     };
     const restore = () => {
       Object.assign(problem, prevFields);
@@ -1381,7 +1385,7 @@ async function refreshProblemHistory(problemId, panelEl, metaEl) {
   const detail = await api(`/api/problems/${problemId}`);
   if (metaEl) {
     metaEl.textContent = detail.srs_last_rating
-      ? formatSrsMeta(detail.srs_last_rating, detail.srs_next_due_date, detail.srs_graduated)
+      ? formatSrsMeta(detail.srs_last_rating, detail.srs_next_due_date, detail.srs_graduated, (detail.attempts || []).length)
       : "未着手";
   }
   renderProblemHistory(panelEl, detail, metaEl);
@@ -1399,10 +1403,11 @@ async function refreshMetaOnly(problemId, metaEl) {
     const cached = findCatalogProblem(problemId);
     if (cached) {
       for (const k of ["srs_last_rating", "srs_next_due_date", "srs_streak", "srs_graduated"]) cached[k] = detail[k];
+      cached.attempt_count = (detail.attempts || []).length;
       refreshBookshelfSummary();
     }
     metaEl.textContent = detail.srs_last_rating
-      ? formatSrsMeta(detail.srs_last_rating, detail.srs_next_due_date, detail.srs_graduated)
+      ? formatSrsMeta(detail.srs_last_rating, detail.srs_next_due_date, detail.srs_graduated, (detail.attempts || []).length)
       : "未着手";
   } catch (err) {
     // 裏更新なので失敗は無視する

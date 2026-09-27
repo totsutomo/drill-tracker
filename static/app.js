@@ -233,17 +233,51 @@ function syncCatalogCache(bookId) {
 }
 
 // キャッシュ即描画→裏で本物のfetchが終わったら再描画、の定型処理
+// 2026-09-28: 以前は端末キャッシュを読み終えてからサーバー取得を始めていた。今は両方を同時に始め、
+// サーバーの応答が先に着いた場合は古いキャッシュで上書きしない(Compassのapiと同じ形)。
 async function loadWithCache(path, render) {
-  const cached = await cacheGet(path);
-  if (cached) render(cached);
+  let fresh = false;
+  const cachedPromise = cacheGet(path).then((data) => {
+    if (fresh || data === undefined) return data;
+    try {
+      render(data);
+    } catch (err) {
+      console.error(`cached render failed: ${path}`, err);
+    }
+    return data;
+  });
   try {
-    const fresh = await api(path);
-    render(fresh);
-    return fresh;
+    const data = await api(path);
+    fresh = true;
+    render(data);
+    return data;
   } catch (err) {
-    if (cached) return cached;
+    const cached = await cachedPromise;
+    if (cached !== undefined) return cached;
     throw err;
   }
+}
+
+// 本の一覧はほぼ変わらないので、端末に前回分があればそれで即進め、最新は裏で差し替える
+// (2026-09-28。本棚・統計・メモの各タブが、まず本の一覧の取得を待ってから本体を読みに行っていた)
+let booksPromise = null;
+function ensureBooks() {
+  if (state.books.length > 0) return Promise.resolve(state.books);
+  if (!booksPromise) {
+    booksPromise = (async () => {
+      const refresh = api("/api/books").then((books) => (state.books = books));
+      const cached = await cacheGet("/api/books");
+      if (cached && cached.length > 0) {
+        if (state.books.length === 0) state.books = cached;
+        refresh.catch(() => {});
+        return state.books;
+      }
+      return refresh;
+    })().finally(() => {
+      booksPromise = null;
+    });
+  }
+  return booksPromise;
 }
 
 // 楽観的更新の共通処理: 成功する前提でローカル状態を即座に書き換えて再描画し(apply)、
@@ -1017,9 +1051,7 @@ async function loadBookshelf() {
   // openOnboarding()等、他の呼び出し元が先にstate.booksだけ埋めていることがある(初回起動時の
   // オンボーディング自動表示が該当)。「books取得済みか」と「表示中の本が決まっているか」は別々に判定する
   // (2026-09-07、両方を1つの条件で判定していて本棚が空白のまま固まるバグがあった)。
-  if (state.books.length === 0) {
-    state.books = await api("/api/books");
-  }
+  await ensureBooks();
   if (!state.currentBookId) {
     // 2026-09-27: 以前は毎回先頭の本(数学Ⅰ)から始まり、開くたびに本を選び直す必要があった
     const saved = loadPref("drill_bookshelf_book", null);
@@ -1585,7 +1617,7 @@ document.getElementById("open-onboarding-btn-2").addEventListener("click", openO
 let notesFilterTimer = null;
 
 async function loadNotes() {
-  if (state.books.length === 0) state.books = await api("/api/books");
+  await ensureBooks();
   const bookSel = document.getElementById("notes-book-filter");
   if (bookSel.options.length <= 1) {
     state.books.forEach((b) => {
@@ -1614,7 +1646,7 @@ async function loadNotes() {
   fetchAndRenderNotes();
 }
 
-async function fetchAndRenderNotes() {
+function currentNotesPath() {
   const bookId = document.getElementById("notes-book-filter").value;
   const mistakeType = document.getElementById("notes-mistake-filter").value;
   const q = document.getElementById("notes-q").value.trim();
@@ -1622,11 +1654,24 @@ async function fetchAndRenderNotes() {
   if (bookId) params.set("book_id", bookId);
   if (mistakeType) params.set("mistake_type", mistakeType);
   if (q) params.set("q", q);
-  const notes = await api(`/api/notes?${params.toString()}`);
-  const list = document.getElementById("notes-list");
-  list.innerHTML = "";
-  document.getElementById("notes-empty").classList.toggle("hidden", notes.length > 0);
-  notes.forEach((n) => list.appendChild(renderNoteCard(n)));
+  return `/api/notes?${params.toString()}`;
+}
+
+// メモを編集・削除した回数。読み込み中にそれが起きたら、読み込み前の中身で一覧を描き直さない
+let notesMutationSeq = 0;
+
+// 2026-09-28: 前回の中身を即描画→裏で最新に差し替え(loadWithCache)
+async function fetchAndRenderNotes() {
+  const path = currentNotesPath();
+  const seq = notesMutationSeq;
+  await loadWithCache(path, (notes) => {
+    if (currentNotesPath() !== path || notesMutationSeq !== seq) return;
+    if (document.querySelector("#notes-list .note-edit-textarea")) return; // 書きかけのメモを消さない
+    const list = document.getElementById("notes-list");
+    list.innerHTML = "";
+    document.getElementById("notes-empty").classList.toggle("hidden", notes.length > 0);
+    notes.forEach((n) => list.appendChild(renderNoteCard(n)));
+  });
 }
 
 function renderNoteCard(note) {
@@ -1715,6 +1760,7 @@ function startEditNote(note, cardEl) {
     // 一覧を読み直す(置き換え後は古いcardEl参照が使えなくなるため、個別revertではなく
     // loadNotesでの全体再取得にしている)。
     note.summary = value;
+    notesMutationSeq++;
     cardEl.replaceWith(renderNoteCard(note));
     try {
       await api(url, { method: "PUT", body: JSON.stringify(body) });
@@ -1733,6 +1779,7 @@ function startEditNote(note, cardEl) {
 async function deleteNote(note, cardEl) {
   const isAttempt = note.kind === "attempt";
   if (!confirm(isAttempt ? "このメモを消しますか?(問題の評価は残ります)" : "このメモを削除しますか?")) return;
+  notesMutationSeq++;
   cardEl.remove();
   document.getElementById("notes-empty").classList.toggle(
     "hidden",
@@ -1762,7 +1809,7 @@ async function deleteNote(note, cardEl) {
 // (2026-09-27。以前は順番に待っていたため、統計APIの遅さがそのまま全カードの遅れになっていた)。
 // 本のチップで絞り込める(全体/各本)。連続日数・目標ペースは常に全体の値。
 async function loadStats() {
-  if (state.books.length === 0) state.books = await api("/api/books").catch(() => []);
+  await ensureBooks().catch(() => []);
   if (state.statsBookId === null) state.statsBookId = loadPref("drill_stats_book", null);
   if (state.statsBookId != null && !state.books.some((b) => b.id === state.statsBookId)) state.statsBookId = null;
   renderBookChips("stats-book-chips", state.statsBookId, selectStatsBook, { includeAll: true });
@@ -2129,7 +2176,7 @@ async function openOnboarding() {
   document.getElementById("onboarding-overlay").classList.remove("hidden");
   const listEl = document.getElementById("onboarding-list");
   listEl.innerHTML = "<p class='meta'>読み込み中...</p>";
-  if (state.books.length === 0) state.books = await api("/api/books");
+  await ensureBooks();
 
   listEl.innerHTML = "";
   for (const book of state.books) {
@@ -2368,13 +2415,18 @@ document.getElementById("shortcut-help-btn").addEventListener("click", () => {
 // ---------- 起動 ----------
 
 async function init() {
-  state.mistakeTypes = await api("/api/mistake-types").catch(() => []);
-  await loadToday();
+  // 2026-09-28: 以前はミス分類→今日タブ→統計の順に1つずつ待っていた。互いに独立なので同時に始める
+  // (ミス分類は評価パネルを開くまで使わないので、前回分を即使い、最新は裏で差し替える)。
+  loadWithCache("/api/mistake-types", (data) => {
+    state.mistakeTypes = data;
+  }).catch(() => {});
   renderDateNav();
+  const today = loadToday();
   // 統計タブは従来「タブを開いた時だけ」読み込んでいたため、今日タブなどで数分過ごしてから
   // 統計タブを開くと毎回そこで待たされていた。起動直後の今日タブ表示をブロックしないよう
   // awaitはせず、裏で先に読み込んでキャッシュを温めておく(2026-09-19、とっつー要望)。
   loadStats().catch(() => {});
+  await today;
 
   try {
     if (!localStorage.getItem("drill_onboarding_seen")) {

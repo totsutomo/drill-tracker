@@ -76,11 +76,13 @@
 
     <!-- 本棚 -->
     <section id="tab-bookshelf" class="tab-panel">
+      <!-- 本の切り替えはチップ(1タップ)。2026-09-27以前はプルダウンで2タップ必要だった -->
+      <div id="book-chips" class="book-chips"></div>
+      <button type="button" id="continue-btn" class="continue-btn hidden"></button>
+      <div id="bookshelf-tree"></div>
       <div class="bookshelf-toolbar">
-        <select id="book-select"></select>
         <button id="open-onboarding-btn" class="link-btn">単元をまとめて評価</button>
       </div>
-      <div id="bookshelf-tree"></div>
     </section>
 
     <!-- メモ -->
@@ -96,13 +98,48 @@
 
     <!-- 統計 -->
     <section id="tab-stats" class="tab-panel">
+      <div id="stats-book-chips" class="book-chips"></div>
       <div class="stats-card">
-        <div class="stats-streak"><span id="stats-streak-num">-</span> 日連続</div>
+        <div class="stats-streak"><span id="stats-streak-num">-</span> 日連続 <span id="stats-streak-freeze" class="stats-streak-freeze"></span></div>
+        <p id="stats-streak-sub" class="stats-streak-sub"></p>
+        <p id="stats-streak-hint" class="stats-streak-hint hidden"></p>
       </div>
+      <div class="stats-today-grid">
+        <div class="stats-big"><b id="stats-today-count">-</b><span>今日解いた</span></div>
+        <div class="stats-big"><b id="stats-today-good">-</b><span>4・5の割合</span></div>
+        <div class="stats-big"><b id="stats-due-now">-</b><span>復習待ち</span></div>
+      </div>
+
+      <div class="stats-card">
+        <h3 class="stats-section-title">直近14日に解いた問題数</h3>
+        <div id="stats-daily" class="bar-chart"></div>
+      </div>
+
+      <div class="stats-card">
+        <h3 class="stats-section-title">今後7日の復習予定</h3>
+        <div id="stats-forecast" class="bar-chart"></div>
+        <p class="stats-note">「今日まで」は期限切れの分を含みます</p>
+      </div>
+
+      <div class="stats-card">
+        <h3 class="stats-section-title" id="stats-weak-title">苦手な問題</h3>
+        <div id="stats-weak-list"></div>
+      </div>
+
+      <button type="button" id="stats-starred-link" class="stats-link">
+        <span><b>★ 重要な問題</b><small>★を付けた問題</small></span>
+        <b id="stats-starred-count">- ›</b>
+      </button>
+
       <div class="stats-card" id="stats-pace-card">
         <p id="stats-pace-text">-</p>
       </div>
-      <div id="stats-books" class="stats-books"></div>
+
+      <div class="stats-card">
+        <h3 class="stats-section-title" id="stats-progress-title">進捗(本編のみ)</h3>
+        <div class="stats-legend"><i class="lg-attempted"></i>着手<i class="lg-mastered"></i>習得(最新の評価が4以上)</div>
+        <div id="stats-progress"></div>
+      </div>
 
       <div class="stats-card">
         <h3 class="stats-section-title">評価分布</h3>

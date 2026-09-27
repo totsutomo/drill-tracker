@@ -93,7 +93,12 @@ def _settle_streak_freeze(conn, today: str, settings: dict) -> tuple:
             conn.commit()
             freezes.add(yesterday)
 
-    current_streak = _streak_ending_at(today, solved | freezes)
+    # 今日まだ1問も解いていない間は「昨日までの連続日数」を出す(2026-09-27)。以前は今日の分が
+    # 記録されるまで0と表示され、14日続けていても朝開くたびに途切れたように見えていた。
+    # 今日が終わっても解かなければ、翌日には昨日が欠けて(フリーズがなければ)0になる。
+    covered = solved | freezes
+    today_done = today in covered
+    current_streak = _streak_ending_at(today if today_done else yesterday, covered)
     # whileにしているのは、settleがしばらく呼ばれない間に複数の節目(7,14...)を一度に
     # 追い越していても、呼ばれた時点でまとめて追いつけるようにするため
     new_milestone = milestone
@@ -106,7 +111,7 @@ def _settle_streak_freeze(conn, today: str, settings: dict) -> tuple:
             (str(milestone),),
         )
         conn.commit()
-    return current_streak, balance()
+    return current_streak, balance(), today_done
 
 
 # ---------- books / catalog ----------
@@ -492,7 +497,7 @@ def queue_today(date: str):
     conn = get_connection()
     # ヘッダーの連続日数を統計APIの応答待ち(旧: 起動から10秒以上「-」表示)にしないよう、ここでも返す
     settings = _all_settings(conn)
-    streak_days, streak_freeze_balance = _settle_streak_freeze(conn, date, settings)
+    streak_days, streak_freeze_balance, streak_today_done = _settle_streak_freeze(conn, date, settings)
     daily_target = int(settings.get("daily_target") or "8")
 
     overdue_total = conn.execute(
@@ -542,6 +547,7 @@ def queue_today(date: str):
         "daily_target": daily_target,
         "streak_days": streak_days,
         "streak_freeze_balance": streak_freeze_balance,
+        "streak_today_done": streak_today_done,
         "solved_today": solved_today,
         "overdue_total": overdue_total,
         "review_count": len(review_queue),
@@ -716,13 +722,13 @@ def list_mistake_types():
 # ---------- 統計 ----------
 
 @app.get("/api/stats/overview")
-def stats_overview(date: str):
+def stats_overview(date: str, book_id: Optional[int] = None):
     # 2026-09-27: 本ごと・週ごとにクエリを投げていた旧実装はTurso相手に約30往復(12秒超)かかり、
     # 統計タブを開いても前回のキャッシュが長時間表示されたまま「更新されない」ように見えていた。
     # 本ごと・週ごとの集計はGROUP BYで1回ずつにまとめる。返す形は旧実装と同じ。
     conn = get_connection()
     settings = _all_settings(conn)
-    streak, streak_freeze_balance = _settle_streak_freeze(conn, date, settings)
+    streak, streak_freeze_balance, streak_today_done = _settle_streak_freeze(conn, date, settings)
 
     # 2026-09-08にEXERCISEセクションを今日タブの出題対象から除外した際、ペース計算(unattempted)だけ
     # 直し忘れていた(EXERCISE分の未着手問題が「残り」に永久にカウントされ続け、pace_per_dayが
@@ -755,8 +761,14 @@ def stats_overview(date: str):
             pace_per_day = round(unattempted_total / days_left, 1)
 
     # 評価分布(Phase2): 現在のproblems.srs_last_ratingの分布。1度も解いていない問題は含めない
+    # book_id指定時(統計タブで本を選んだ時、2026-09-27)は評価分布と推移だけその本に絞る。
+    # 連続日数・ペース・本ごとの進捗は常に全体の値
+    book_cond = " AND s.book_id = ?" if book_id is not None else ""
+    book_params = (book_id,) if book_id is not None else ()
     dist_rows = conn.execute(
-        "SELECT srs_last_rating, COUNT(*) FROM problems WHERE srs_last_rating IS NOT NULL GROUP BY srs_last_rating"
+        "SELECT p.srs_last_rating, COUNT(*) FROM problems p JOIN sections s ON p.section_id = s.id "
+        f"WHERE p.srs_last_rating IS NOT NULL{book_cond} GROUP BY p.srs_last_rating",
+        book_params,
     ).fetchall()
     dist_map = {r[0]: r[1] for r in dist_rows}
     rating_distribution = {str(r): dist_map.get(r, 0) for r in (1, 2, 3, 4, 5)}
@@ -766,9 +778,10 @@ def stats_overview(date: str):
     # (未来の6日を含む)になり、朝に数問解いただけで平均が急落して見えた。今日で終わる7日ごとに区切る。
     oldest_start = add_days(date, -7 * 7 - 6)
     bucket_rows = conn.execute(
-        "SELECT CAST((julianday(?) - julianday(local_date)) / 7 AS INTEGER) AS bucket, COUNT(*), AVG(rating) "
-        "FROM attempts WHERE source = 'solve' AND local_date BETWEEN ? AND ? GROUP BY bucket",
-        (date, oldest_start, date),
+        "SELECT CAST((julianday(?) - julianday(a.local_date)) / 7 AS INTEGER) AS bucket, COUNT(*), AVG(a.rating) "
+        "FROM attempts a JOIN problems p ON a.problem_id = p.id JOIN sections s ON p.section_id = s.id "
+        f"WHERE a.source = 'solve' AND a.local_date BETWEEN ? AND ?{book_cond} GROUP BY bucket",
+        (date, oldest_start, date) + book_params,
     ).fetchall()
     buckets = {r[0]: (r[1], r[2]) for r in bucket_rows}
     weekly_trend = []
@@ -786,6 +799,7 @@ def stats_overview(date: str):
     return {
         "streak_days": streak,
         "streak_freeze_balance": streak_freeze_balance,
+        "streak_today_done": streak_today_done,
         "books": books,
         "exam_target_date": exam_target_date,
         "days_left": days_left,
@@ -797,25 +811,28 @@ def stats_overview(date: str):
 
 
 @app.get("/api/stats/weakness")
-def stats_weakness(date: str, days: int = 30):
+def stats_weakness(date: str, days: int = 30, book_id: Optional[int] = None):
     """ミスタイプ別頻度・要注意単元(実装プラン5章のPhase2項目)。
     直近days日分のsource='solve'記録のみを対象にする(古いimport/seedデータで
     今の弱点像が歪まないようにするため)。"""
     conn = get_connection()
     since = add_days(date, -days)
 
+    book_cond = " AND s.book_id = ?" if book_id is not None else ""
+    book_params = (book_id,) if book_id is not None else ()
     mistake_breakdown = rows_to_dicts(
         conn.execute(
-            "SELECT mistake_type, COUNT(*) AS count FROM attempts "
-            "WHERE source = 'solve' AND mistake_type IS NOT NULL AND mistake_type != '' "
-            "AND local_date >= ? GROUP BY mistake_type ORDER BY count DESC",
-            (since,),
+            "SELECT a.mistake_type AS mistake_type, COUNT(*) AS count FROM attempts a "
+            "JOIN problems p ON a.problem_id = p.id JOIN sections s ON p.section_id = s.id "
+            "WHERE a.source = 'solve' AND a.mistake_type IS NOT NULL AND a.mistake_type != '' "
+            f"AND a.local_date >= ?{book_cond} GROUP BY a.mistake_type ORDER BY count DESC",
+            (since,) + book_params,
         )
     )
 
     weak_units = rows_to_dicts(
         conn.execute(
-            """
+            f"""
             SELECT u.id AS unit_id, u.name AS unit_name, c.name AS chapter_name, b.title AS book_title,
                    COUNT(*) AS low_rating_count, ROUND(AVG(a.rating), 2) AS avg_rating
             FROM attempts a
@@ -824,16 +841,115 @@ def stats_weakness(date: str, days: int = 30):
             JOIN chapters c ON u.chapter_id = c.id
             JOIN sections se ON c.section_id = se.id
             JOIN books b ON se.book_id = b.id
-            WHERE a.source = 'solve' AND a.rating <= 2 AND a.local_date >= ?
+            WHERE a.source = 'solve' AND a.rating <= 2 AND a.local_date >= ?{book_cond.replace("s.book_id", "b.id")}
             GROUP BY u.id
             ORDER BY low_rating_count DESC, avg_rating ASC
             LIMIT 5
             """,
-            (since,),
+            (since,) + book_params,
         )
     )
     conn.close()
     return {"since": since, "mistake_breakdown": mistake_breakdown, "weak_units": weak_units}
+
+
+# 統計タブの拡充(2026-09-27、Stackの統計画面に合わせる)。今日の数字・直近14日・今後7日の
+# 復習予定・進捗(本編のみ、着手/習得)・苦手な問題・★の件数をまとめて返す。
+# Tursoは1クエリごとに往復がかかるため、問題は1回で全件(約1100行)読んでPython側で集計する。
+# 進捗・復習予定・苦手な問題は今日タブの出題対象と同じ「本編・もう出さない以外」に揃える
+# (2026-09-08にEXERCISEを出題対象から外したのに、本ごとの進捗の分母にだけ残っていたため)。
+MASTERED_RATING = 4
+WEAK_RATING = 2
+
+
+@app.get("/api/stats/detail")
+def stats_detail(date: str, book_id: Optional[int] = None):
+    conn = get_connection()
+    problems = rows_to_dicts(
+        conn.execute(
+            "SELECT p.id, p.number, p.retired_at, p.starred_at, p.srs_last_rating, p.srs_next_due_date, "
+            "b.id AS book_id, b.title AS book_title, s.name AS section_name, "
+            "c.id AS chapter_id, c.number AS chapter_number, c.name AS chapter_name, u.name AS unit_name "
+            f"FROM problems p {PROBLEM_DISPLAY_JOINS} "
+            "ORDER BY b.sort_order, b.id, s.sort_order, c.sort_order, c.id, p.catalog_order"
+        )
+    )
+    since = add_days(date, -13)
+    book_cond = " AND s.book_id = ?" if book_id is not None else ""
+    daily_rows = conn.execute(
+        "SELECT a.local_date, COUNT(*), SUM(CASE WHEN a.rating >= ? THEN 1 ELSE 0 END) "
+        "FROM attempts a JOIN problems p ON a.problem_id = p.id JOIN sections s ON p.section_id = s.id "
+        f"WHERE a.source = 'solve' AND a.local_date BETWEEN ? AND ?{book_cond} GROUP BY a.local_date",
+        (MASTERED_RATING, since, date) + ((book_id,) if book_id is not None else ()),
+    ).fetchall()
+    solved_dates, freeze_dates = set(), set()
+    for kind, d in conn.execute(
+        "SELECT DISTINCT 's', local_date FROM attempts WHERE source = 'solve' "
+        "UNION ALL SELECT 'f', date FROM streak_freezes"
+    ).fetchall():
+        (solved_dates if kind == "s" else freeze_dates).add(d)
+    conn.close()
+
+    # 最長の連続日数(フリーズで守った日も連続に含める。ヘッダーの連続日数と同じ数え方)
+    longest, run, prev = 0, 0, None
+    for d in sorted(solved_dates | freeze_dates):
+        run = run + 1 if prev is not None and add_days(prev, 1) == d else 1
+        longest = max(longest, run)
+        prev = d
+
+    daily_map = {r[0]: (r[1], r[2] or 0) for r in daily_rows}
+    daily = []
+    for i in range(13, -1, -1):
+        d = add_days(date, -i)
+        daily.append({"date": d, "count": daily_map.get(d, (0, 0))[0], "freeze": d in freeze_dates})
+    today_count, today_good = daily_map.get(date, (0, 0))
+
+    in_scope = [p for p in problems if book_id is None or p["book_id"] == book_id]
+    main_live = [p for p in in_scope if p["section_name"] != "EXERCISE" and not p["retired_at"]]
+
+    forecast = []
+    for i in range(7):
+        d = add_days(date, i)
+        if i == 0:  # 「今日まで」は期限切れの分を含む(今日タブの「復習待ち」と同じ条件)
+            n = sum(1 for p in main_live if p["srs_next_due_date"] and p["srs_next_due_date"] <= d)
+        else:
+            n = sum(1 for p in main_live if p["srs_next_due_date"] == d)
+        forecast.append({"date": d, "count": n})
+
+    # 本を選んでいない時は本ごと、選んだ時は章ごと
+    by_chapter = book_id is not None
+    groups = {}
+    if not by_chapter:  # 本編が1問もない本も0として並べる
+        for p in problems:
+            groups.setdefault(p["book_id"], {"id": p["book_id"], "label": p["book_title"], "total": 0, "attempted": 0, "mastered": 0})
+    for p in main_live:
+        key = p["chapter_id"] if by_chapter else p["book_id"]
+        label = f"第{p['chapter_number']}章 {p['chapter_name']}" if by_chapter else p["book_title"]
+        g = groups.setdefault(key, {"id": key, "label": label, "total": 0, "attempted": 0, "mastered": 0})
+        g["total"] += 1
+        if p["srs_last_rating"] is not None:
+            g["attempted"] += 1
+            if p["srs_last_rating"] >= MASTERED_RATING:
+                g["mastered"] += 1
+
+    weak = [p for p in main_live if p["srs_last_rating"] is not None and p["srs_last_rating"] <= WEAK_RATING]
+    weak.sort(key=lambda p: (p["srs_next_due_date"] or "", p["srs_last_rating"]))
+
+    return {
+        "today": {"count": today_count, "good": today_good},
+        "longest_streak": longest,
+        "daily": daily,
+        "forecast": forecast,
+        "progress_by": "chapter" if by_chapter else "book",
+        "progress": list(groups.values()),
+        "weak_total": len(weak),
+        "weak": [
+            {k: p[k] for k in ("id", "number", "book_id", "book_title", "section_name", "chapter_id",
+                               "unit_name", "srs_last_rating", "srs_next_due_date")}
+            for p in weak[:30]
+        ],
+        "starred_total": sum(1 for p in in_scope if p["starred_at"]),
+    }
 
 
 @app.get("/api/stats/heatmap")

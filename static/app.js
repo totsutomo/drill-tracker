@@ -339,6 +339,9 @@ const state = {
   catalogCache: {},
   currentBookId: null,
   viewingDate: todayStr(),
+  statsBookId: null, // 統計タブで選んでいる本(null=全体)。loadPrefで復元する(下のloadStats参照)
+  statsDetail: null,
+  pendingReveal: null, // 本棚を開いた直後にスクロールして見せたい問題 { chapterId, problemId }
 };
 
 // 端末ごとの表示の好み(最後に開いた本など)。localStorageが使えない環境でも動くよう必ずtry/catchする
@@ -406,7 +409,7 @@ async function loadToday() {
 function renderToday() {
   const data = state.today;
   if (!data) return;
-  if (data.streak_days != null) renderHeaderStreak(data.streak_days, data.streak_freeze_balance);
+  if (data.streak_days != null) renderHeaderStreak(data.streak_days, data.streak_freeze_balance, data.streak_today_done);
   document.getElementById("quota-solved").textContent = data.solved_today;
   document.getElementById("quota-target").textContent = data.daily_target;
   document.getElementById("quota-achieved-msg").classList.toggle("hidden", data.solved_today < data.daily_target);
@@ -542,6 +545,12 @@ function addSolveToTodayState(problem, rating, { memo = null, mistakeType = null
   };
   state.today.queue = state.today.queue.filter((p) => p.id !== problem.id);
   state.today.solved_today++;
+  if (state.today.streak_today_done === false) {
+    state.today.streak_today_done = true;
+    state.today.streak_days++;
+    entry.flippedStreak = true;
+    renderHeaderStreak(state.today.streak_days, state.today.streak_freeze_balance, true);
+  }
   state.today.done_today = [entry, ...(state.today.done_today || [])];
   return entry;
 }
@@ -632,6 +641,10 @@ async function undoTodayRating(entry, problem, label, created) {
     state.today.done_today = (state.today.done_today || []).filter((d) => d !== entry);
     state.today.queue = [problem, ...state.today.queue.filter((p) => p.id !== problem.id)];
     state.today.solved_today = Math.max(0, state.today.solved_today - 1);
+    if (entry.flippedStreak) {
+      state.today.streak_today_done = false;
+      state.today.streak_days = Math.max(0, state.today.streak_days - 1);
+    }
     renderToday();
   }
   showToast(`${label} の評価を取り消しました`);
@@ -976,34 +989,41 @@ document.getElementById("rate-modal-submit").addEventListener("click", async () 
 
 // ---------- 本棚タブ ----------
 
+function shortBookTitle(title) {
+  return (title || "").replace(/^青チャート\s*/, "");
+}
+
+// 本のチップ(本棚・統計で共通)。activeIdがnullで includeAll の時は「全体」を選択中にする
+function renderBookChips(containerId, activeId, onSelect, { includeAll = false } = {}) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = "";
+  const items = includeAll ? [{ id: null, title: "全体" }, ...state.books] : state.books;
+  items.forEach((b) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "book-chip" + (b.id === activeId ? " active" : "");
+    chip.textContent = b.id === null ? "全体" : shortBookTitle(b.title);
+    chip.addEventListener("click", () => onSelect(b.id));
+    el.appendChild(chip);
+  });
+  // 画面幅に収まらない時、選択中のチップが見える位置まで横にずらす
+  const active = el.querySelector(".book-chip.active");
+  if (active) el.scrollLeft = Math.max(0, active.offsetLeft - el.offsetLeft - 16);
+}
+
 async function loadBookshelf() {
-  // 「books配列を取得済みか」と「本棚タブの<select>をまだ組み立てていないか」は別物として扱う。
-  // openOnboarding()等、他の呼び出し元が先にstate.booksだけ埋めていることがあり(初回起動時のオンボーディング自動表示が該当)、
-  // 以前はstate.books.length===0だけで判定していたため、その場合<select>もcurrentBookIdも一生初期化されず
-  // 本棚タブが空白のまま固まるバグがあった(2026-09-07発覚)。
+  // openOnboarding()等、他の呼び出し元が先にstate.booksだけ埋めていることがある(初回起動時の
+  // オンボーディング自動表示が該当)。「books取得済みか」と「表示中の本が決まっているか」は別々に判定する
+  // (2026-09-07、両方を1つの条件で判定していて本棚が空白のまま固まるバグがあった)。
   if (state.books.length === 0) {
     state.books = await api("/api/books");
-  }
-  const sel = document.getElementById("book-select");
-  if (sel.options.length === 0) {
-    sel.innerHTML = "";
-    state.books.forEach((b) => {
-      const opt = document.createElement("option");
-      opt.value = b.id;
-      opt.textContent = b.title;
-      sel.appendChild(opt);
-    });
-    sel.addEventListener("change", () => renderBookshelfBook(Number(sel.value)));
   }
   if (!state.currentBookId) {
     // 2026-09-27: 以前は毎回先頭の本(数学Ⅰ)から始まり、開くたびに本を選び直す必要があった
     const saved = loadPref("drill_bookshelf_book", null);
     state.currentBookId = state.books.some((b) => b.id === saved) ? saved : state.books[0]?.id;
   }
-  if (state.currentBookId) {
-    document.getElementById("book-select").value = state.currentBookId;
-    renderBookshelfBook(state.currentBookId);
-  }
+  if (state.currentBookId) renderBookshelfBook(state.currentBookId);
 }
 
 // 前後の本へ切り替える([ / ] キー用)
@@ -1011,24 +1031,130 @@ function switchBookBy(delta) {
   if (!state.books.length || !state.currentBookId) return;
   const idx = state.books.findIndex((b) => b.id === state.currentBookId);
   const next = state.books[(idx + delta + state.books.length) % state.books.length];
-  document.getElementById("book-select").value = next.id;
   renderBookshelfBook(next.id);
+}
+
+// 統計タブの苦手な問題などから、その問題の本・章を開いて見せる
+function openProblemInBookshelf(bookId, chapterId, problemId) {
+  expandedChapterIds.add(chapterId);
+  savePref("drill_expanded_chapters", [...expandedChapterIds]);
+  state.pendingReveal = { bookId, chapterId, problemId };
+  if (state.currentBookId !== bookId) {
+    document.getElementById("bookshelf-tree").innerHTML = "<p class='meta'>読み込み中...</p>";
+    state.currentBookId = bookId;
+  }
+  switchTab("tab-bookshelf");
+}
+
+// 章を開いてその問題までスクロールし、一瞬枠を光らせる
+function revealProblemInBookshelf(chapterId, problemId) {
+  expandedChapterIds.add(chapterId);
+  savePref("drill_expanded_chapters", [...expandedChapterIds]);
+  const block = document.querySelector(`#bookshelf-tree .chapter-block[data-chapter-id="${chapterId}"]`);
+  if (block) block.classList.add("expanded");
+  const row = document.querySelector(`#bookshelf-tree .problem-row-book[data-problem-id="${problemId}"]`);
+  const wrap = row && row.closest(".problem-row-wrap");
+  if (!wrap) return;
+  wrap.scrollIntoView({ block: "center" });
+  wrap.classList.add("flash");
+  setTimeout(() => wrap.classList.remove("flash"), 1600);
+}
+
+// 章の進捗(着手/全体、もう出さない問題は除く=統計の進捗と同じ数え方)と「続きから」を、
+// 表示中の本のカタログ(評価のたびに楽観的に書き換わるproblemオブジェクト)から作り直す
+function chapterLiveProblems(chapter) {
+  return (chapter.units || []).flatMap((u) => u.problems || []).filter((p) => !p.retired_at);
+}
+
+// 続きから = 本編で、カタログ順に最初の未着手問題(今日タブの新規問題と同じ選び方)
+function findNextUnattempted(book) {
+  for (const section of book.sections || []) {
+    if (section.name === "EXERCISE") continue;
+    for (const chapter of section.chapters || []) {
+      for (const unit of chapter.units || []) {
+        for (const problem of unit.problems || []) {
+          if (problem.srs_last_rating == null && !problem.retired_at) return { section, chapter, unit, problem };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function refreshBookshelfSummary() {
+  const book = state.catalogCache[state.currentBookId];
+  if (!book) return;
+  (book.sections || []).forEach((section) =>
+    (section.chapters || []).forEach((chapter) => {
+      const block = document.querySelector(`#bookshelf-tree .chapter-block[data-chapter-id="${chapter.id}"]`);
+      if (!block) return;
+      const problems = chapterLiveProblems(chapter);
+      const done = problems.filter((p) => p.srs_last_rating != null).length;
+      block.querySelector(".chapter-progress").textContent = `着手 ${done}/${problems.length}`;
+      block.querySelector(".chapter-bar > i").style.width = `${problems.length ? (done / problems.length) * 100 : 0}%`;
+    })
+  );
+
+  const btn = document.getElementById("continue-btn");
+  btn.classList.remove("hidden");
+  btn.innerHTML = "";
+  const next = findNextUnattempted(book);
+  btn.classList.toggle("done", !next);
+  btn.onclick = null;
+  if (!next) {
+    btn.textContent = "この本の本編は全問着手済みです";
+    return;
+  }
+  const label = document.createElement("span");
+  label.className = "continue-label";
+  label.textContent = "▶ 続きから";
+  const info = document.createElement("span");
+  info.textContent = `${next.section.name} #${next.problem.number}`;
+  const sub = document.createElement("span");
+  sub.className = "continue-sub";
+  sub.textContent = `第${next.chapter.number}章 ${next.chapter.name} ・ ${next.unit.name}`;
+  info.appendChild(sub);
+  btn.append(label, info);
+  btn.onclick = () => revealProblemInBookshelf(next.chapter.id, next.problem.id);
+}
+
+function findCatalogProblem(problemId) {
+  const book = state.catalogCache[state.currentBookId];
+  for (const section of book?.sections || []) {
+    for (const chapter of section.chapters || []) {
+      for (const unit of chapter.units || []) {
+        const found = (unit.problems || []).find((p) => p.id === problemId);
+        if (found) return found;
+      }
+    }
+  }
+  return null;
 }
 
 async function renderBookshelfBook(bookId) {
   const isBookSwitch = state.currentBookId !== bookId;
   state.currentBookId = bookId;
   savePref("drill_bookshelf_book", bookId);
+  renderBookChips("book-chips", bookId, (id) => renderBookshelfBook(id));
   // 本の切り替え時だけ「読み込み中」を出す。評価・メモ・もう出さない等の操作後に呼ばれる
   // 再描画では、ここでツリーを空にしてしまうと開いていた章の表示も一瞬消えてガタつくため出さない
   // (renderCatalogがexpandedChapterIdsを見て復元するとはいえ、消してから作り直す動き自体が目障りだった)。
   if (isBookSwitch) {
     document.getElementById("bookshelf-tree").innerHTML = "<p class='meta'>読み込み中...</p>";
   }
+  if (isBookSwitch) document.getElementById("continue-btn").classList.add("hidden");
+  const reveal = () => {
+    const r = state.pendingReveal;
+    if (r && r.bookId === bookId) revealProblemInBookshelf(r.chapterId, r.problemId);
+  };
   await loadWithCache(`/api/books/${bookId}/catalog`, (data) => {
     state.catalogCache[bookId] = data;
-    if (state.currentBookId === bookId) renderCatalog(data);
+    if (state.currentBookId === bookId) {
+      renderCatalog(data);
+      reveal();
+    }
   });
+  if (state.pendingReveal && state.pendingReveal.bookId === bookId) state.pendingReveal = null;
 }
 
 function renderCatalog(book) {
@@ -1045,9 +1171,14 @@ function renderCatalog(book) {
     (section.chapters || []).forEach((chapter) => {
       const block = document.createElement("div");
       block.className = "chapter-block" + (expandedChapterIds.has(chapter.id) ? " expanded" : "");
+      block.dataset.chapterId = chapter.id;
       const header = document.createElement("div");
       header.className = "chapter-header";
-      header.textContent = `第${chapter.number}章 ${chapter.name}`;
+      // 見出しに章の進捗(数字はrefreshBookshelfSummaryが入れる。評価のたびにそこだけ書き換える)
+      header.innerHTML =
+        '<div class="chapter-title-row"><span class="chapter-title"></span><span class="chapter-progress"></span></div>' +
+        '<div class="chapter-bar"><i></i></div>';
+      header.querySelector(".chapter-title").textContent = `第${chapter.number}章 ${chapter.name}`;
       header.addEventListener("click", () => {
         const nowExpanded = block.classList.toggle("expanded");
         if (nowExpanded) expandedChapterIds.add(chapter.id);
@@ -1077,6 +1208,7 @@ function renderCatalog(book) {
       tree.appendChild(block);
     });
   });
+  refreshBookshelfSummary();
 }
 
 function renderBookshelfRow(problem, book) {
@@ -1133,8 +1265,10 @@ function renderBookshelfRow(problem, book) {
     const restore = () => {
       Object.assign(problem, prevFields);
       meta.textContent = prevMeta;
+      refreshBookshelfSummary();
     };
     applyRatingPreview(rating);
+    refreshBookshelfSummary();
     // 今日タブが裏で開いていなくても「済み」件数へ即反映する(2026-09-19)。
     const todayEntry = addSolveToTodayState(namedProblem, rating, opts);
     if (todayEntry) rerenderTodayAfterStateChange();
@@ -1201,6 +1335,7 @@ function renderBookshelfRow(problem, book) {
     retireBtn.classList.toggle("active", !wasRetired);
     retireBtn.textContent = wasRetired ? "もう出さない" : "解除";
     row.classList.toggle("retired", !wasRetired);
+    refreshBookshelfSummary();
     try {
       await api(`/api/problems/${problem.id}/retire`, { method: "POST" });
       syncCatalogCache(book.id);
@@ -1209,6 +1344,7 @@ function renderBookshelfRow(problem, book) {
       retireBtn.classList.toggle("active", wasRetired);
       retireBtn.textContent = wasRetired ? "解除" : "もう出さない";
       row.classList.toggle("retired", wasRetired);
+      refreshBookshelfSummary();
       showToast("更新に失敗しました。もう一度お試しください");
     }
   });
@@ -1259,6 +1395,12 @@ async function refreshMetaOnly(problemId, metaEl) {
   if (!metaEl) return;
   try {
     const detail = await api(`/api/problems/${problemId}`);
+    // 履歴の削除・評価修正で未着手に戻る等した時、章の進捗と「続きから」も追いかけて直す
+    const cached = findCatalogProblem(problemId);
+    if (cached) {
+      for (const k of ["srs_last_rating", "srs_next_due_date", "srs_streak", "srs_graduated"]) cached[k] = detail[k];
+      refreshBookshelfSummary();
+    }
     metaEl.textContent = detail.srs_last_rating
       ? formatSrsMeta(detail.srs_last_rating, detail.srs_next_due_date, detail.srs_graduated)
       : "未着手";
@@ -1611,23 +1753,46 @@ async function deleteNote(note, cardEl) {
 
 // ---------- 統計タブ ----------
 
-// 3本は互いに独立しているので並行して読み、1本が失敗しても他のカードは表示する
-// (2026-09-27。以前は順番に待っていたため、統計APIの遅さがそのまま全カードの遅れになっていた)
+// 4本は互いに独立しているので並行して読み、1本が失敗しても他のカードは表示する
+// (2026-09-27。以前は順番に待っていたため、統計APIの遅さがそのまま全カードの遅れになっていた)。
+// 本のチップで絞り込める(全体/各本)。連続日数・目標ペースは常に全体の値。
 async function loadStats() {
+  if (state.books.length === 0) state.books = await api("/api/books").catch(() => []);
+  if (state.statsBookId === null) state.statsBookId = loadPref("drill_stats_book", null);
+  if (state.statsBookId != null && !state.books.some((b) => b.id === state.statsBookId)) state.statsBookId = null;
+  renderBookChips("stats-book-chips", state.statsBookId, selectStatsBook, { includeAll: true });
   const date = todayStr();
-  const [overview] = await Promise.allSettled([
-    loadWithCache(`/api/stats/overview?date=${date}`, renderStats),
-    loadWithCache(`/api/stats/weakness?date=${date}`, renderWeakness),
-    loadWithCache(`/api/stats/heatmap`, renderHeatmap),
+  const bookId = state.statsBookId;
+  const q = bookId != null ? `&book_id=${bookId}` : "";
+  // 本を素早く切り替えた時、前の本の応答が後から届いて上書きしないようにする
+  const onlyIfCurrent = (render) => (data) => {
+    if (state.statsBookId === bookId) render(data);
+  };
+  const [overview, , detail] = await Promise.allSettled([
+    loadWithCache(`/api/stats/overview?date=${date}${q}`, onlyIfCurrent(renderStats)),
+    loadWithCache(`/api/stats/weakness?date=${date}${q}`, onlyIfCurrent(renderWeakness)),
+    loadWithCache(`/api/stats/detail?date=${date}${q}`, onlyIfCurrent(renderStatsDetail)),
+    loadWithCache(`/api/stats/heatmap`, onlyIfCurrent(renderHeatmap)),
   ]);
-  if (overview.status === "rejected") {
-    document.getElementById("stats-pace-text").textContent = "統計を読み込めませんでした。タブを開き直すと再試行します";
+  if (overview.status === "rejected" || detail.status === "rejected") {
+    document.getElementById("stats-pace-text").textContent = "統計の一部を読み込めませんでした。タブを開き直すと再試行します";
   }
 }
 
+function selectStatsBook(bookId) {
+  state.statsBookId = bookId;
+  savePref("drill_stats_book", bookId);
+  statsWeakExpanded = false;
+  loadStats();
+}
+
 // ヘッダーの連続日数。今日タブのAPIも同じ値を返すので、統計APIを待たずに出せる
-function renderHeaderStreak(days, freezeBalance) {
+// todayDone === false の間(今日まだ解いていない)は炎を薄くして「今日の分がまだ」と分かるようにする
+function renderHeaderStreak(days, freezeBalance, todayDone) {
   document.getElementById("header-streak-num").textContent = days;
+  const chip = document.getElementById("header-streak");
+  chip.classList.toggle("pending", todayDone === false);
+  chip.title = todayDone === false ? "今日はまだ解いていません(1問解くと連続日数が続きます)" : "";
   const freezeBadge = document.getElementById("header-streak-freeze");
   const balance = freezeBalance || 0;
   freezeBadge.classList.toggle("hidden", balance <= 0);
@@ -1636,7 +1801,11 @@ function renderHeaderStreak(days, freezeBalance) {
 
 function renderStats(data) {
   document.getElementById("stats-streak-num").textContent = data.streak_days;
-  renderHeaderStreak(data.streak_days, data.streak_freeze_balance);
+  renderHeaderStreak(data.streak_days, data.streak_freeze_balance, data.streak_today_done);
+  document.getElementById("stats-streak-freeze").textContent = "🧊".repeat(Math.min(data.streak_freeze_balance || 0, 2));
+  const hint = document.getElementById("stats-streak-hint");
+  hint.classList.toggle("hidden", data.streak_today_done !== false);
+  hint.textContent = `今日1問解くと ${data.streak_days + 1} 日連続`;
   const paceEl = document.getElementById("stats-pace-text");
   if (data.exam_target_date && data.days_left != null) {
     paceEl.textContent =
@@ -1645,25 +1814,6 @@ function renderStats(data) {
   } else {
     paceEl.textContent = "目標日は設定タブから設定できます";
   }
-  const booksEl = document.getElementById("stats-books");
-  booksEl.innerHTML = "";
-  (data.books || []).forEach((b) => {
-    const row = document.createElement("div");
-    row.className = "stats-book-row";
-    const title = document.createElement("div");
-    title.className = "book-title";
-    title.innerHTML = `<span>${b.title}</span><span>${b.attempted_problems}/${b.total_problems}</span>`;
-    const track = document.createElement("div");
-    track.className = "progress-bar-track";
-    const fill = document.createElement("div");
-    fill.className = "progress-bar-fill";
-    fill.style.width = `${b.progress_percent}%`;
-    track.appendChild(fill);
-    row.appendChild(title);
-    row.appendChild(track);
-    booksEl.appendChild(row);
-  });
-
   renderDistribution(data.rating_distribution);
   renderTrend(data.weekly_trend);
 }
@@ -1790,6 +1940,131 @@ function renderWeakness(data) {
   });
 }
 
+// ---------- 統計タブ: 拡充分(2026-09-27、Stackの統計画面に合わせる) ----------
+
+let statsWeakExpanded = false;
+const WEEKDAY_LABELS = ["日", "月", "火", "水", "木", "金", "土"];
+
+function renderBarChart(el, bars) {
+  el.innerHTML = "";
+  const max = Math.max(1, ...bars.map((b) => b.count));
+  bars.forEach((b) => {
+    const col = document.createElement("div");
+    col.className = "bar-col" + (b.current ? " current" : "") + (b.freeze && !b.count ? " freeze" : "");
+    const value = document.createElement("em");
+    value.textContent = b.count ? b.count : b.freeze ? "🧊" : "";
+    const bar = document.createElement("i");
+    bar.style.height = `${b.freeze && !b.count ? 6 : Math.max(2, (b.count / max) * 80)}px`;
+    const label = document.createElement("small");
+    label.textContent = b.label;
+    col.title = b.title || "";
+    col.append(value, bar, label);
+    el.appendChild(col);
+  });
+}
+
+function renderStatsDetail(d) {
+  state.statsDetail = d;
+  document.getElementById("stats-streak-sub").textContent =
+    `最長 ${d.longest_streak}日 ・ 🧊は7日続けるごとに1個(最大2個)貯まり、休んだ日に自動で使われます`;
+  document.getElementById("stats-today-count").textContent = d.today.count;
+  document.getElementById("stats-today-good").textContent =
+    d.today.count ? `${Math.round((d.today.good / d.today.count) * 100)}%` : "–";
+  document.getElementById("stats-due-now").textContent = d.forecast[0]?.count ?? "-";
+
+  const today = todayStr();
+  renderBarChart(
+    document.getElementById("stats-daily"),
+    d.daily.map((x) => ({
+      count: x.count,
+      freeze: x.freeze,
+      current: x.date === today,
+      label: x.date === today ? "今日" : String(Number(x.date.slice(8))),
+      title: `${x.date}: ${x.count}問${x.freeze ? "(フリーズで継続)" : ""}`,
+    }))
+  );
+  renderBarChart(
+    document.getElementById("stats-forecast"),
+    d.forecast.map((x, i) => ({
+      count: x.count,
+      current: i === 0,
+      label: i === 0 ? "今日まで" : WEEKDAY_LABELS[new Date(x.date + "T00:00:00").getDay()],
+      title: `${x.date}: ${x.count}問`,
+    }))
+  );
+
+  renderStatsWeak(d);
+  document.getElementById("stats-starred-count").textContent = `${d.starred_total} ›`;
+
+  document.getElementById("stats-progress-title").textContent =
+    d.progress_by === "chapter" ? "進捗(本編のみ・章ごと)" : "進捗(本編のみ)";
+  const progressEl = document.getElementById("stats-progress");
+  progressEl.innerHTML = "";
+  d.progress.forEach((g) => {
+    const row = document.createElement("div");
+    row.className = "progress-row";
+    const head = document.createElement("div");
+    head.className = "progress-head";
+    const name = document.createElement("span");
+    name.textContent = d.progress_by === "chapter" ? g.label : shortBookTitle(g.label);
+    const nums = document.createElement("span");
+    nums.textContent = `着手 ${g.attempted} ・ 習得 ${g.mastered} / ${g.total}`;
+    head.append(name, nums);
+    const track = document.createElement("div");
+    track.className = "progress-track";
+    const pct = (n) => (g.total ? (n / g.total) * 100 : 0);
+    track.innerHTML = `<i class="pt-attempted" style="width:${pct(g.attempted)}%"></i><i class="pt-mastered" style="width:${pct(g.mastered)}%"></i>`;
+    row.append(head, track);
+    progressEl.appendChild(row);
+  });
+}
+
+// 苦手な問題は「眺めて終わり」にしないよう、タップでその問題の本棚へ飛べるようにする
+function renderStatsWeak(d) {
+  document.getElementById("stats-weak-title").textContent = `苦手な問題(最新の評価が1〜2) ${d.weak_total}問`;
+  const list = document.getElementById("stats-weak-list");
+  list.innerHTML = "";
+  if (d.weak.length === 0) {
+    list.innerHTML = "<p class='meta'>ありません。評価1〜2を付けた問題がここに並びます。</p>";
+    return;
+  }
+  const shown = statsWeakExpanded ? d.weak : d.weak.slice(0, 5);
+  shown.forEach((p) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "weak-row";
+    const name = document.createElement("span");
+    name.className = "weak-name";
+    const badge = document.createElement("span");
+    badge.className = "history-badge";
+    badge.style.background = `var(--rate-${p.srs_last_rating})`;
+    badge.textContent = p.srs_last_rating;
+    const text = document.createElement("span");
+    text.textContent = `${shortBookTitle(p.book_title)} #${p.number} ${p.unit_name || ""}`;
+    name.append(badge, text);
+    const due = document.createElement("span");
+    due.className = "weak-due";
+    due.textContent = p.srs_next_due_date ? `次回 ${p.srs_next_due_date.slice(5)} ›` : "›";
+    row.append(name, due);
+    row.addEventListener("click", () => openProblemInBookshelf(p.book_id, p.chapter_id, p.id));
+    list.appendChild(row);
+  });
+  if (d.weak.length > 5) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "weak-more";
+    more.textContent = statsWeakExpanded ? "閉じる" : `すべて見る(${d.weak_total}問)`;
+    more.addEventListener("click", () => {
+      statsWeakExpanded = !statsWeakExpanded;
+      renderStatsWeak(d);
+    });
+    list.appendChild(more);
+  }
+}
+
+document.getElementById("stats-starred-link").addEventListener("click", openStarredDrawer);
+
+
 function heatmapColor(unit) {
   if (!unit.attempted) return "var(--bg-elevated)";
   if (unit.avg_rating >= 4) return "var(--rate-5)";
@@ -1801,7 +2076,8 @@ function renderHeatmap(data) {
   const el = document.getElementById("stats-heatmap");
   el.innerHTML = "";
   let currentBook = null;
-  (data.units || []).forEach((u) => {
+  const onlyTitle = state.statsBookId != null ? state.books.find((b) => b.id === state.statsBookId)?.title : null;
+  (data.units || []).filter((u) => !onlyTitle || u.book_title === onlyTitle).forEach((u) => {
     if (u.book_title !== currentBook) {
       currentBook = u.book_title;
       const heading = document.createElement("div");

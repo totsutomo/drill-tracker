@@ -122,12 +122,29 @@ function apiProgressEnd() {
 }
 
 let toastTimer = null;
-function showToast(message) {
+// action: { label, onClick } を渡すとトースト内にボタンを出す(評価直後の「取り消す」用、2026-09-27)。
+// ボタン付きの時だけ押せるよう pointer-events を有効にし、表示時間も少し長くする。
+function showToast(message, action = null) {
   const el = document.getElementById("toast-banner");
-  el.textContent = message;
+  el.textContent = "";
+  const text = document.createElement("span");
+  text.textContent = message;
+  el.appendChild(text);
+  if (action) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-action";
+    btn.textContent = action.label;
+    btn.addEventListener("click", () => {
+      el.classList.remove("show");
+      action.onClick();
+    });
+    el.appendChild(btn);
+  }
+  el.classList.toggle("has-action", !!action);
   el.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), 4000);
+  toastTimer = setTimeout(() => el.classList.remove("show"), action ? 6000 : 4000);
 }
 
 // ---------- 起動時キャッシュ(体感速度改善。オフライン対応が目的ではない) ----------
@@ -324,9 +341,27 @@ const state = {
   viewingDate: todayStr(),
 };
 
+// 端末ごとの表示の好み(最後に開いた本など)。localStorageが使えない環境でも動くよう必ずtry/catchする
+function loadPref(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw == null ? fallback : JSON.parse(raw);
+  } catch (err) {
+    return fallback;
+  }
+}
+function savePref(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (err) {
+    // 保存できなくても表示には影響しない
+  }
+}
+
 // 本棚タブで開いている章(chapter.id)を覚えておく。renderCatalog()は評価のたびに
 // ツリーを丸ごと作り直すため、これが無いと開いていた章が毎回閉じた状態に戻ってしまう(2026-09-07発覚)。
-const expandedChapterIds = new Set();
+// 2026-09-27: アプリを開き直しても前回の続きから見られるよう、localStorageにも保存する。
+const expandedChapterIds = new Set(loadPref("drill_expanded_chapters", []));
 
 // ---------- 共通: attempt送信 ----------
 
@@ -371,6 +406,7 @@ async function loadToday() {
 function renderToday() {
   const data = state.today;
   if (!data) return;
+  if (data.streak_days != null) renderHeaderStreak(data.streak_days, data.streak_freeze_balance);
   document.getElementById("quota-solved").textContent = data.solved_today;
   document.getElementById("quota-target").textContent = data.daily_target;
   document.getElementById("quota-achieved-msg").classList.toggle("hidden", data.solved_today < data.daily_target);
@@ -527,7 +563,7 @@ function rerenderTodayAfterStateChange() {
 async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = null } = {}) {
   let ok = true;
   let entry;
-  await optimistic(
+  const created = optimistic(
     () => {
       entry = addSolveToTodayState(problem, rating, { memo, mistakeType });
       rerenderTodayAfterStateChange();
@@ -538,18 +574,14 @@ async function recordTodayAttempt(problem, rating, { memo = null, mistakeType = 
       loadToday();
     },
     () => submitAttempt(problem, rating, { memo, mistakeType })
-  )
-    .then((created) => {
-      entry.attempt_id = created.id;
-      lastRatedAttempt = {
-        attemptId: created.id,
-        label: `${problem.book_title || ""} #${problem.number}`,
-        entry,
-        problem,
-      };
-      syncTodayCache();
-    })
-    .catch(() => {});
+  ).then((c) => {
+    entry.attempt_id = c.id;
+    syncTodayCache();
+    return c;
+  });
+  const label = `${problem.book_title || ""} #${problem.number}`;
+  const token = offerUndo(`${label} を評価${rating}で記録`, () => undoTodayRating(entry, problem, label, created));
+  await created.catch(() => clearUndo(token));
   return ok;
 }
 
@@ -558,34 +590,54 @@ async function rateTodayProblem(problem, rating) {
 }
 
 async function submitTodayFromModal(problem, rating, opts) {
-  const ok = await recordTodayAttempt(problem, rating, opts);
-  if (ok) showToast("記録しました");
+  // 「記録しました」は取り消しボタン付きのトースト(offerUndo)が兼ねる
+  await recordTodayAttempt(problem, rating, opts);
 }
 
-// 直近1件だけ戻せるUndo(2026-09-16追加、Zキー用)。評価ボタン/キーボード/メモ付きモーダル、
-// どの経路でもrecordTodayAttemptを通るのでここ1箇所で追跡すれば全部カバーできる。
+// 直近1件だけ戻せるUndo。2026-09-16にZキー用として追加し、2026-09-27に評価直後のトーストの
+// 「取り消す」ボタンからも使えるようにした(スマホでは押し間違えても取り消す手段がなかったため)。
+// 今日タブ・本棚タブのどの評価経路もofferUndoを通すので、ここ1箇所で追跡すれば全部カバーできる。
 // スタックにはせず常に最新の1件のみ(戻したら次のUndo対象はまた無しに戻る)。
-let lastRatedAttempt = null;
+let lastUndo = null;
+let undoSeq = 0;
+
+function offerUndo(message, run) {
+  const token = ++undoSeq;
+  lastUndo = { token, run };
+  showToast(message, { label: "取り消す", onClick: undoLastRating });
+  return token;
+}
+
+// 送信に失敗した記録は取り消し対象から外す(失敗時はoptimisticが既に巻き戻している)
+function clearUndo(token) {
+  if (lastUndo && lastUndo.token === token) lastUndo = null;
+}
 
 async function undoLastRating() {
-  if (!lastRatedAttempt) {
+  if (!lastUndo) {
     showToast("取り消せる記録がありません");
     return;
   }
-  const { attemptId, label, entry, problem } = lastRatedAttempt;
-  lastRatedAttempt = null;
-  // 2026-09-16: 楽観的更新に統一。サーバー応答を待たず先にキューへ戻す
-  // (problemは評価前のオブジェクト参照そのものなので、srs_*系フィールドは
-  // rateされる前の値のまま=キューに戻す表示として正しい)。
+  const { run } = lastUndo;
+  lastUndo = null;
+  await run();
+}
+
+// created: 記録送信のPromise。サーバー応答前に取り消された場合も、応答を待ってから削除する
+// (以前はattempt_idが確定するまでUndo対象に載らず、評価直後の取り消しが効かなかった)。
+async function undoTodayRating(entry, problem, label, created) {
+  // 楽観的更新: サーバー応答を待たず先にキューへ戻す(problemは評価前のオブジェクト参照
+  // そのものなので、srs_*系フィールドはrateされる前の値のまま=キューに戻す表示として正しい)。
   if (state.today) {
     state.today.done_today = (state.today.done_today || []).filter((d) => d !== entry);
-    state.today.queue = [problem, ...state.today.queue];
+    state.today.queue = [problem, ...state.today.queue.filter((p) => p.id !== problem.id)];
     state.today.solved_today = Math.max(0, state.today.solved_today - 1);
     renderToday();
   }
   showToast(`${label} の評価を取り消しました`);
   try {
-    await api(`/api/attempts/${attemptId}`, { method: "DELETE" });
+    const c = await created;
+    await api(`/api/attempts/${c.id}`, { method: "DELETE" });
     syncTodayCache();
   } catch (err) {
     showToast("取り消しに失敗しました。最新の状態を再取得します");
@@ -944,7 +996,9 @@ async function loadBookshelf() {
     sel.addEventListener("change", () => renderBookshelfBook(Number(sel.value)));
   }
   if (!state.currentBookId) {
-    state.currentBookId = state.books[0]?.id;
+    // 2026-09-27: 以前は毎回先頭の本(数学Ⅰ)から始まり、開くたびに本を選び直す必要があった
+    const saved = loadPref("drill_bookshelf_book", null);
+    state.currentBookId = state.books.some((b) => b.id === saved) ? saved : state.books[0]?.id;
   }
   if (state.currentBookId) {
     document.getElementById("book-select").value = state.currentBookId;
@@ -952,9 +1006,19 @@ async function loadBookshelf() {
   }
 }
 
+// 前後の本へ切り替える([ / ] キー用)
+function switchBookBy(delta) {
+  if (!state.books.length || !state.currentBookId) return;
+  const idx = state.books.findIndex((b) => b.id === state.currentBookId);
+  const next = state.books[(idx + delta + state.books.length) % state.books.length];
+  document.getElementById("book-select").value = next.id;
+  renderBookshelfBook(next.id);
+}
+
 async function renderBookshelfBook(bookId) {
   const isBookSwitch = state.currentBookId !== bookId;
   state.currentBookId = bookId;
+  savePref("drill_bookshelf_book", bookId);
   // 本の切り替え時だけ「読み込み中」を出す。評価・メモ・もう出さない等の操作後に呼ばれる
   // 再描画では、ここでツリーを空にしてしまうと開いていた章の表示も一瞬消えてガタつくため出さない
   // (renderCatalogがexpandedChapterIdsを見て復元するとはいえ、消してから作り直す動き自体が目障りだった)。
@@ -988,6 +1052,7 @@ function renderCatalog(book) {
         const nowExpanded = block.classList.toggle("expanded");
         if (nowExpanded) expandedChapterIds.add(chapter.id);
         else expandedChapterIds.delete(chapter.id);
+        savePref("drill_expanded_chapters", [...expandedChapterIds]);
       });
       const body = document.createElement("div");
       body.className = "chapter-body";
@@ -1055,6 +1120,56 @@ function renderBookshelfRow(problem, book) {
     meta.textContent = formatSrsMeta(rating, preview.nextDue, preview.graduated);
   }
 
+  // 番号ボタン(メモなし)とメモ付きモーダルの共通処理。先にmeta表示・problemの状態・今日タブの
+  // 「済み」を書き換え(楽観的更新)、失敗した時だけ元に戻す。記録後はトーストの「取り消す」/Zキーで戻せる。
+  function recordFromBookshelf(rating, opts = {}) {
+    const prevMeta = meta.textContent;
+    const prevFields = {
+      srs_last_rating: problem.srs_last_rating,
+      srs_next_due_date: problem.srs_next_due_date,
+      srs_streak: problem.srs_streak,
+      srs_graduated: problem.srs_graduated,
+    };
+    const restore = () => {
+      Object.assign(problem, prevFields);
+      meta.textContent = prevMeta;
+    };
+    applyRatingPreview(rating);
+    // 今日タブが裏で開いていなくても「済み」件数へ即反映する(2026-09-19)。
+    const todayEntry = addSolveToTodayState(namedProblem, rating, opts);
+    if (todayEntry) rerenderTodayAfterStateChange();
+    const created = submitAttempt(namedProblem, rating, opts).then((c) => {
+      if (todayEntry) {
+        todayEntry.attempt_id = c.id;
+        syncTodayCache();
+      }
+      syncCatalogCache(book.id);
+      return c;
+    });
+    const label = `${book.title} #${problem.number}`;
+    const token = offerUndo(`${label} を評価${rating}で記録`, async () => {
+      restore();
+      showToast(`${label} の評価を取り消しました`);
+      try {
+        const c = await created;
+        await api(`/api/attempts/${c.id}`, { method: "DELETE" });
+        syncCatalogCache(book.id);
+      } catch (err) {
+        showToast("取り消しに失敗しました");
+        refreshMetaOnly(problem.id, meta);
+      }
+      // 今日タブ側(済み・キュー)は個別に巻き戻さず、サーバーの状態を取り直して整合させる
+      if (todayEntry) loadToday();
+    });
+    created.catch(() => {
+      clearUndo(token);
+      restore();
+      // 今日タブ側は個別に巻き戻さず、サーバーの状態を取り直して整合させる
+      if (todayEntry) loadToday();
+      showToast("保存に失敗しました。もう一度お試しください");
+    });
+  }
+
   const btnWrap = document.createElement("div");
   btnWrap.className = "rate-buttons-inline";
   for (let r = 1; r <= 5; r++) {
@@ -1064,34 +1179,7 @@ function renderBookshelfRow(problem, book) {
     btn.textContent = String(r);
     btn.title = RATING_LABELS[r];
     // Todayタブと同じく、番号ボタンは1タップでそのまま記録する(メモなし)。
-    // 失敗した場合だけ元のmeta表示・problemの状態に戻す。
-    btn.addEventListener("click", async () => {
-      const prevMeta = meta.textContent;
-      const prevFields = {
-        srs_last_rating: problem.srs_last_rating,
-        srs_next_due_date: problem.srs_next_due_date,
-        srs_streak: problem.srs_streak,
-        srs_graduated: problem.srs_graduated,
-      };
-      applyRatingPreview(r);
-      // 今日タブが裏で開いていなくても「済み」件数へ即反映する(2026-09-19)。
-      const todayEntry = addSolveToTodayState(namedProblem, r);
-      if (todayEntry) rerenderTodayAfterStateChange();
-      try {
-        const created = await submitAttempt(namedProblem, r);
-        if (todayEntry) {
-          todayEntry.attempt_id = created.id;
-          syncTodayCache();
-        }
-        syncCatalogCache(book.id);
-      } catch (err) {
-        Object.assign(problem, prevFields);
-        meta.textContent = prevMeta;
-        // 今日タブ側は個別に巻き戻さず、サーバーの状態を取り直して整合させる
-        if (todayEntry) loadToday();
-        showToast("保存に失敗しました。もう一度お試しください");
-      }
-    });
+    btn.addEventListener("click", () => recordFromBookshelf(r));
     btnWrap.appendChild(btn);
   }
   const memoBtn = document.createElement("button");
@@ -1099,34 +1187,7 @@ function renderBookshelfRow(problem, book) {
   memoBtn.innerHTML = ICON_PENCIL;
   memoBtn.title = "メモを付けて記録";
   memoBtn.addEventListener("click", () =>
-    openRateModal(namedProblem, {
-      onSubmit: async (p, rating, opts) => {
-        const prevMeta = meta.textContent;
-        const prevFields = {
-          srs_last_rating: problem.srs_last_rating,
-          srs_next_due_date: problem.srs_next_due_date,
-          srs_streak: problem.srs_streak,
-          srs_graduated: problem.srs_graduated,
-        };
-        applyRatingPreview(rating);
-        const todayEntry = addSolveToTodayState(namedProblem, rating, opts);
-        if (todayEntry) rerenderTodayAfterStateChange();
-        try {
-          const created = await submitAttempt(p, rating, opts);
-          if (todayEntry) {
-            todayEntry.attempt_id = created.id;
-            syncTodayCache();
-          }
-          syncCatalogCache(book.id);
-          showToast("記録しました");
-        } catch (err) {
-          Object.assign(problem, prevFields);
-          meta.textContent = prevMeta;
-          if (todayEntry) loadToday();
-          showToast("保存に失敗しました。もう一度お試しください");
-        }
-      },
-    })
+    openRateModal(namedProblem, { onSubmit: (p, rating, opts) => recordFromBookshelf(rating, opts) })
   );
 
   const starBtn = createStarButton(problem, () => syncCatalogCache(book.id));
@@ -1518,14 +1579,30 @@ function startEditNote(note, cardEl) {
   });
 }
 
+// 2026-09-27: 評価に付いたメモ(kind === "attempt")は、以前はDELETE /api/attempts/{id}で
+// 評価記録ごと消していた(メモだけを書き換えるAPIがなかった2026-09-06当時の作り)。確認文は
+// 「メモを削除」なのに評価とSRSの次回予定まで消えてしまうため、メモ欄だけを空にする形に変更。
+// 質問ログ由来のメモ(kind === "standalone")は従来どおりメモそのものを削除する。
 async function deleteNote(note, cardEl) {
-  if (!confirm("このメモを削除しますか?")) return;
-  // note.kind === "standalone" は質問ログ由来のメモ(/api/notesで削除)、
-  // "attempt" は問題評価に紐づくメモ(削除するとattempt自体を取り消し、SRS状態も再計算される)
-  const url = note.kind === "attempt" ? `/api/attempts/${note.id}` : `/api/notes/${note.id}`;
+  const isAttempt = note.kind === "attempt";
+  if (!confirm(isAttempt ? "このメモを消しますか?(問題の評価は残ります)" : "このメモを削除しますか?")) return;
   cardEl.remove();
+  document.getElementById("notes-empty").classList.toggle(
+    "hidden",
+    document.getElementById("notes-list").children.length > 0
+  );
   try {
-    await api(url, { method: "DELETE" });
+    if (isAttempt) {
+      const doneEntry = (state.today?.done_today || []).find((d) => d.attempt_id === note.id);
+      if (doneEntry) {
+        doneEntry.memo = null;
+        renderTodayDoneSection();
+      }
+      await api(`/api/attempts/${note.id}/memo`, { method: "PUT", body: JSON.stringify({ memo: "" }) });
+      if (doneEntry) syncTodayCache();
+    } else {
+      await api(`/api/notes/${note.id}`, { method: "DELETE" });
+    }
   } catch (err) {
     showToast("削除に失敗しました");
     loadNotes();
@@ -1534,19 +1611,32 @@ async function deleteNote(note, cardEl) {
 
 // ---------- 統計タブ ----------
 
+// 3本は互いに独立しているので並行して読み、1本が失敗しても他のカードは表示する
+// (2026-09-27。以前は順番に待っていたため、統計APIの遅さがそのまま全カードの遅れになっていた)
 async function loadStats() {
-  await loadWithCache(`/api/stats/overview?date=${todayStr()}`, renderStats);
-  await loadWithCache(`/api/stats/weakness?date=${todayStr()}`, renderWeakness);
-  await loadWithCache(`/api/stats/heatmap`, renderHeatmap);
+  const date = todayStr();
+  const [overview] = await Promise.allSettled([
+    loadWithCache(`/api/stats/overview?date=${date}`, renderStats),
+    loadWithCache(`/api/stats/weakness?date=${date}`, renderWeakness),
+    loadWithCache(`/api/stats/heatmap`, renderHeatmap),
+  ]);
+  if (overview.status === "rejected") {
+    document.getElementById("stats-pace-text").textContent = "統計を読み込めませんでした。タブを開き直すと再試行します";
+  }
+}
+
+// ヘッダーの連続日数。今日タブのAPIも同じ値を返すので、統計APIを待たずに出せる
+function renderHeaderStreak(days, freezeBalance) {
+  document.getElementById("header-streak-num").textContent = days;
+  const freezeBadge = document.getElementById("header-streak-freeze");
+  const balance = freezeBalance || 0;
+  freezeBadge.classList.toggle("hidden", balance <= 0);
+  freezeBadge.textContent = "🧊".repeat(Math.min(balance, 2));
 }
 
 function renderStats(data) {
   document.getElementById("stats-streak-num").textContent = data.streak_days;
-  document.getElementById("header-streak-num").textContent = data.streak_days;
-  const freezeBadge = document.getElementById("header-streak-freeze");
-  const freezeBalance = data.streak_freeze_balance || 0;
-  freezeBadge.classList.toggle("hidden", freezeBalance <= 0);
-  freezeBadge.textContent = "🧊".repeat(Math.min(freezeBalance, 2));
+  renderHeaderStreak(data.streak_days, data.streak_freeze_balance);
   const paceEl = document.getElementById("stats-pace-text");
   if (data.exam_target_date && data.days_left != null) {
     paceEl.textContent =
@@ -1607,34 +1697,48 @@ function renderDistribution(distribution) {
   }
 }
 
+// 2026-09-27: 以前はSVGを縦横比固定のまま高さ80pxに収めていたため、横幅の広い画面では点が
+// 中央の300px幅に押し込まれ、日付ラベル(横幅いっぱいに均等配置)とずれていた(最新の点が
+// 2つ前のラベルの上に来て「更新されていない」ように見えた)。線は縦横比を無視して引き伸ばし、
+// 点・数値・ラベルは同じ%座標でHTML配置して、どの幅でも位置が揃うようにする。
 function renderTrend(weeklyTrend) {
   const el = document.getElementById("stats-trend");
   el.innerHTML = "";
   if (!weeklyTrend || weeklyTrend.length === 0) return;
-  const w = 300, h = 80, pad = 10;
-  const stepX = (w - pad * 2) / (weeklyTrend.length - 1 || 1);
-  const yFor = (rating) => h - pad - ((rating - 1) / 4) * (h - pad * 2);
-  const points = weeklyTrend.map((wk, i) => {
-    const x = pad + i * stepX;
-    const y = wk.avg_rating != null ? yFor(wk.avg_rating) : null;
-    return { x, y, wk };
-  });
-  const withData = points.filter((p) => p.y != null);
-  let svg = `<svg viewBox="0 0 ${w} ${h}" class="trend-svg">`;
-  if (withData.length > 1) {
-    const line = withData.map((p) => `${p.x},${p.y}`).join(" ");
-    svg += `<polyline points="${line}" fill="none" stroke="var(--accent)" stroke-width="2" />`;
+  const n = weeklyTrend.length;
+  const xPct = (i) => (n === 1 ? 50 : 5 + (i * 90) / (n - 1));
+  const yPct = (rating) => 85 - ((rating - 1) / 4) * 70;
+  const points = weeklyTrend
+    .map((wk, i) => ({ wk, x: xPct(i), y: wk.avg_rating != null ? yPct(wk.avg_rating) : null }))
+    .filter((p) => p.y != null);
+
+  const plot = document.createElement("div");
+  plot.className = "trend-plot";
+  let svg = '<svg viewBox="0 0 100 100" preserveAspectRatio="none" class="trend-svg">';
+  if (points.length > 1) {
+    svg += `<polyline points="${points.map((p) => `${p.x},${p.y}`).join(" ")}" fill="none" stroke="var(--accent)" stroke-width="2" vector-effect="non-scaling-stroke" />`;
   }
-  withData.forEach((p) => {
-    svg += `<circle cx="${p.x}" cy="${p.y}" r="3" fill="var(--accent)" />`;
+  plot.innerHTML = svg + "</svg>";
+  points.forEach((p) => {
+    const dot = document.createElement("span");
+    dot.className = "trend-dot";
+    dot.style.left = `${p.x}%`;
+    dot.style.top = `${p.y}%`;
+    dot.title = `${p.wk.week_start}〜${p.wk.week_end || ""}: 平均${p.wk.avg_rating}(${p.wk.count}問)`;
+    const value = document.createElement("span");
+    value.className = "trend-value";
+    value.textContent = p.wk.avg_rating.toFixed(1);
+    dot.appendChild(value);
+    plot.appendChild(dot);
   });
-  svg += `</svg>`;
-  el.innerHTML = svg;
+  el.appendChild(plot);
+
   const labels = document.createElement("div");
   labels.className = "trend-labels";
-  weeklyTrend.forEach((wk) => {
+  weeklyTrend.forEach((wk, i) => {
     const span = document.createElement("span");
-    span.textContent = wk.week_start.slice(5); // "MM-DD"
+    span.style.left = `${xPct(i)}%`;
+    span.textContent = i === n - 1 ? "直近7日" : wk.week_start.slice(5); // "MM-DD"
     labels.appendChild(span);
   });
   el.appendChild(labels);
@@ -1864,22 +1968,47 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  if (isTypingTarget(e.target)) return;
-
-  // 設定ドロワーが開いている間: Escで閉じる
-  if (settingsDrawer.classList.contains("open")) {
-    if (e.key === "Escape") closeSettingsDrawer();
+  // Escは入力欄にいても効かせる(開いているパネルを手前から1つ閉じる)。2026-09-27以前は
+  // 設定ドロワーしか閉じられず、★ドロワーと「単元をまとめて評価」はEscが効かなかった。
+  if (e.key === "Escape" && closeTopPanel()) {
+    e.preventDefault();
     return;
   }
 
+  if (isTypingTarget(e.target)) return;
+  // パネルが開いている間は、裏のタブへの1文字ショートカットを無効にする
+  if (anyPanelOpen()) return;
+
+  if (e.key === "?") {
+    e.preventDefault();
+    openShortcutHelp();
+    return;
+  }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  const activeTab = document.querySelector(".tab-panel.active")?.id;
+
   // 今日タブ表示中: 1-5でキュー先頭の問題を即評価(メモなし)、Mでメモ付き評価モーダルを開く、
-  // Zで直前の評価を取り消す(キューが空でも使えるよう、problem存在チェックより前に置く)
-  if (document.getElementById("tab-today").classList.contains("active")) {
+  // Zで直前の評価を取り消す(キューが空でも使えるよう、problem存在チェックより前に置く)、
+  // ←/→で前日/翌日の記録を見る(2026-09-27追加)
+  if (activeTab === "tab-today") {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      goToDate(addDaysLocal(state.viewingDate, -1));
+      return;
+    }
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      if (state.viewingDate !== todayStr()) goToDate(addDaysLocal(state.viewingDate, 1));
+      return;
+    }
     if (e.key === "z" || e.key === "Z") {
       e.preventDefault();
       undoLastRating();
       return;
     }
+    // 過去日を表示している間は今日のキューが隠れているので、見えない問題を評価しないようにする
+    if (state.viewingDate !== todayStr()) return;
     const problem = (state.today?.queue || [])[0];
     if (!problem) return;
     if (e.key >= "1" && e.key <= "5") {
@@ -1889,7 +2018,70 @@ document.addEventListener("keydown", (e) => {
       e.preventDefault();
       openRateModal(problem, { onSubmit: submitTodayFromModal });
     }
+    return;
   }
+
+  // 本棚タブ: [ / ] で前後の本、Zで直前の評価を取り消す(本棚の評価ボタンもUndo対象)
+  if (activeTab === "tab-bookshelf") {
+    if (e.key === "[" || e.key === "]") {
+      e.preventDefault();
+      switchBookBy(e.key === "]" ? 1 : -1);
+    } else if (e.key === "z" || e.key === "Z") {
+      e.preventDefault();
+      undoLastRating();
+    }
+    return;
+  }
+
+  // メモタブ: / で検索欄へ
+  if (activeTab === "tab-notes" && e.key === "/") {
+    e.preventDefault();
+    document.getElementById("notes-q").focus();
+  }
+});
+
+// 開いているパネル(手前にあるものから順)を1つ閉じる。閉じたらtrue
+function closeTopPanel() {
+  const help = document.getElementById("shortcut-help");
+  if (!help.classList.contains("hidden")) {
+    help.classList.add("hidden");
+    return true;
+  }
+  if (!document.getElementById("onboarding-overlay").classList.contains("hidden")) {
+    document.getElementById("onboarding-close-btn").click();
+    return true;
+  }
+  if (starredDrawer.classList.contains("open")) {
+    closeStarredDrawer();
+    return true;
+  }
+  if (settingsDrawer.classList.contains("open")) {
+    closeSettingsDrawer();
+    return true;
+  }
+  return false;
+}
+
+function anyPanelOpen() {
+  return (
+    !document.getElementById("shortcut-help").classList.contains("hidden") ||
+    !document.getElementById("onboarding-overlay").classList.contains("hidden") ||
+    starredDrawer.classList.contains("open") ||
+    settingsDrawer.classList.contains("open")
+  );
+}
+
+function openShortcutHelp() {
+  const help = document.getElementById("shortcut-help");
+  help.classList.remove("hidden");
+  document.getElementById("shortcut-help-close").focus({ preventScroll: true });
+}
+document.getElementById("shortcut-help-close").addEventListener("click", () => {
+  document.getElementById("shortcut-help").classList.add("hidden");
+});
+document.getElementById("shortcut-help-btn").addEventListener("click", () => {
+  closeSettingsDrawer();
+  openShortcutHelp();
 });
 
 // ---------- 起動 ----------

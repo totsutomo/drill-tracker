@@ -45,21 +45,8 @@ LAST_UPDATED = _load_last_updated()
 SEED_LEVEL_RATING = {"weak": 2, "normal": 3, "good": 4}
 
 
-def _get_setting(conn, key: str, default: Optional[str] = None) -> Optional[str]:
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    return row[0] if row else default
-
-
-def _solved_dates(conn) -> set:
-    # 「実際に解いた」日だけを数える(source='solve')。importの過去データや
-    # seedの一括自己申告はアプリを使い続けている実感=ストリークには含めない
-    rows = conn.execute("SELECT DISTINCT local_date FROM attempts WHERE source = 'solve'").fetchall()
-    return {r[0] for r in rows}
-
-
-def _freeze_dates(conn) -> set:
-    rows = conn.execute("SELECT date FROM streak_freezes").fetchall()
-    return {r[0] for r in rows}
+def _all_settings(conn) -> dict:
+    return {k: v for k, v in conn.execute("SELECT key, value FROM settings").fetchall()}
 
 
 def _streak_ending_at(end_date: str, covered_dates: set) -> int:
@@ -71,50 +58,55 @@ def _streak_ending_at(end_date: str, covered_dates: set) -> int:
     return streak
 
 
-def _compute_streak(conn, today: str) -> int:
-    covered = _solved_dates(conn) | _freeze_dates(conn)
-    return _streak_ending_at(today, covered)
-
-
 STREAK_FREEZE_MILESTONE_STEP = 7
 STREAK_FREEZE_BALANCE_CAP = 2
-
-
-def _streak_freeze_balance(conn) -> int:
-    milestone = int(_get_setting(conn, "streak_freeze_milestone", "0") or "0")
-    earned = milestone // STREAK_FREEZE_MILESTONE_STEP
-    used = conn.execute("SELECT COUNT(*) FROM streak_freezes").fetchone()[0]
-    return max(0, earned - used)
 
 
 # never miss twiceの自動版(2026-09-19)。昨日1日だけ欠けていて、それまでに7日以上の
 # 連続実績がありフリーズ残高が残っていれば自動消費して継続扱いにする。あわせて現在の
 # ストリークが新しい7の倍数に到達していれば(残高が上限未満なら)フリーズを1個貯める。
 # べき等: 同じ状態で何度呼んでも結果は変わらない(streak_freezes.dateがPRIMARY KEYのため
-# 同じ日を二重に消費することはない)。/api/stats/overviewのリクエストごとに呼ぶ想定
-def _settle_streak_freeze(conn, today: str) -> None:
-    solved = _solved_dates(conn)
-    freezes = _freeze_dates(conn)
+# 同じ日を二重に消費することはない)。/api/queue/today・/api/stats/overviewのリクエストごとに呼ぶ
+#
+# 2026-09-27: Tursoは1クエリごとに約0.3秒の往復がかかるため、同じ日付一覧を何度も読み直していた
+# 旧実装(1回の呼び出しで7〜9クエリ)を、3回読んでメモリ上で判定する形に変更。
+# 戻り値は(現在のストリーク日数, フリーズ残高)で、呼び出し側はこれをそのまま表示に使う。
+def _settle_streak_freeze(conn, today: str, settings: dict) -> tuple:
+    # 「実際に解いた」日だけを数える(source='solve')。importの過去データや
+    # seedの一括自己申告はアプリを使い続けている実感=ストリークには含めない
+    solved, freezes = set(), set()
+    for kind, d in conn.execute(
+        "SELECT DISTINCT 's', local_date FROM attempts WHERE source = 'solve' "
+        "UNION ALL SELECT 'f', date FROM streak_freezes"
+    ).fetchall():
+        (solved if kind == "s" else freezes).add(d)
+    milestone = int(settings.get("streak_freeze_milestone") or "0")
+
+    def balance() -> int:
+        return max(0, milestone // STREAK_FREEZE_MILESTONE_STEP - len(freezes))
 
     yesterday = add_days(today, -1)
     if yesterday not in solved and yesterday not in freezes:
         streak_before_gap = _streak_ending_at(add_days(yesterday, -1), solved | freezes)
-        if streak_before_gap >= STREAK_FREEZE_MILESTONE_STEP and _streak_freeze_balance(conn) >= 1:
+        if streak_before_gap >= STREAK_FREEZE_MILESTONE_STEP and balance() >= 1:
             conn.execute("INSERT INTO streak_freezes (date) VALUES (?)", (yesterday,))
             conn.commit()
+            freezes.add(yesterday)
 
-    current_streak = _compute_streak(conn, today)
-    milestone = int(_get_setting(conn, "streak_freeze_milestone", "0") or "0")
+    current_streak = _streak_ending_at(today, solved | freezes)
     # whileにしているのは、settleがしばらく呼ばれない間に複数の節目(7,14...)を一度に
     # 追い越していても、呼ばれた時点でまとめて追いつけるようにするため
-    while current_streak >= milestone + STREAK_FREEZE_MILESTONE_STEP and _streak_freeze_balance(conn) < STREAK_FREEZE_BALANCE_CAP:
+    new_milestone = milestone
+    while current_streak >= milestone + STREAK_FREEZE_MILESTONE_STEP and balance() < STREAK_FREEZE_BALANCE_CAP:
         milestone += STREAK_FREEZE_MILESTONE_STEP
+    if milestone != new_milestone:
         conn.execute(
             "INSERT INTO settings (key, value) VALUES ('streak_freeze_milestone', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(milestone),),
         )
         conn.commit()
+    return current_streak, balance()
 
 
 # ---------- books / catalog ----------
@@ -498,12 +490,10 @@ def queue_today(date: str):
     """dateは必ずクライアントのローカル日付(YYYY-MM-DD)。サーバーのUTC時計とNZ現地日付の
     ズレを避けるため、サーバー側では絶対に「今日」を計算しない(study-trackerの教訓#65と同種)。"""
     conn = get_connection()
-    _settle_streak_freeze(conn, date)
-    daily_target = int(_get_setting(conn, "daily_target", "8"))
-
-    solved_today = conn.execute(
-        "SELECT COUNT(*) FROM attempts WHERE source = 'solve' AND local_date = ?", (date,)
-    ).fetchone()[0]
+    # ヘッダーの連続日数を統計APIの応答待ち(旧: 起動から10秒以上「-」表示)にしないよう、ここでも返す
+    settings = _all_settings(conn)
+    streak_days, streak_freeze_balance = _settle_streak_freeze(conn, date, settings)
+    daily_target = int(settings.get("daily_target") or "8")
 
     overdue_total = conn.execute(
         "SELECT COUNT(*) FROM problems p JOIN sections s ON p.section_id = s.id "
@@ -543,11 +533,15 @@ def queue_today(date: str):
     # 今日すでに解いた問題(evaluation付き)。キューから消すのではなく「済み」として
     # 別グループで見せ続けるための一覧(2026-09-08、とっつー要望: 消すとモチベが下がる)。
     done_today = _solved_on_date(conn, date)
+    # 旧実装はCOUNT(*)を別クエリで取っていたが、条件がdone_todayと全く同じなので件数で代用する
+    solved_today = len(done_today)
 
     conn.close()
     return {
         "date": date,
         "daily_target": daily_target,
+        "streak_days": streak_days,
+        "streak_freeze_balance": streak_freeze_balance,
         "solved_today": solved_today,
         "overdue_total": overdue_total,
         "review_count": len(review_queue),
@@ -723,34 +717,35 @@ def list_mistake_types():
 
 @app.get("/api/stats/overview")
 def stats_overview(date: str):
+    # 2026-09-27: 本ごと・週ごとにクエリを投げていた旧実装はTurso相手に約30往復(12秒超)かかり、
+    # 統計タブを開いても前回のキャッシュが長時間表示されたまま「更新されない」ように見えていた。
+    # 本ごと・週ごとの集計はGROUP BYで1回ずつにまとめる。返す形は旧実装と同じ。
     conn = get_connection()
-    _settle_streak_freeze(conn, date)
-    streak = _compute_streak(conn, date)
-    streak_freeze_balance = _streak_freeze_balance(conn)
+    settings = _all_settings(conn)
+    streak, streak_freeze_balance = _settle_streak_freeze(conn, date, settings)
 
-    books = rows_to_dicts(conn.execute("SELECT * FROM books ORDER BY sort_order, id"))
+    # 2026-09-08にEXERCISEセクションを今日タブの出題対象から除外した際、ペース計算(unattempted)だけ
+    # 直し忘れていた(EXERCISE分の未着手問題が「残り」に永久にカウントされ続け、pace_per_dayが
+    # 実態より過大に出る不整合があった)。queue_todayと同じ条件に揃えて2026-09-16に修正。
+    books = rows_to_dicts(
+        conn.execute(
+            "SELECT b.*, COUNT(p.id) AS total_problems, "
+            "SUM(CASE WHEN p.srs_last_rating IS NOT NULL THEN 1 ELSE 0 END) AS attempted_problems, "
+            "SUM(CASE WHEN p.srs_last_rating IS NULL AND p.retired_at IS NULL AND s.name != 'EXERCISE' "
+            "THEN 1 ELSE 0 END) AS unattempted_main "
+            "FROM books b LEFT JOIN sections s ON s.book_id = b.id LEFT JOIN problems p ON p.section_id = s.id "
+            "GROUP BY b.id ORDER BY b.sort_order, b.id"
+        )
+    )
+    unattempted_total = 0
     for book in books:
-        total = conn.execute(
-            "SELECT COUNT(*) FROM problems p JOIN sections s ON p.section_id = s.id WHERE s.book_id = ?",
-            (book["id"],),
-        ).fetchone()[0]
-        attempted = conn.execute(
-            "SELECT COUNT(*) FROM problems p JOIN sections s ON p.section_id = s.id "
-            "WHERE s.book_id = ? AND p.srs_last_rating IS NOT NULL",
-            (book["id"],),
-        ).fetchone()[0]
-        book["total_problems"] = total
+        total = book["total_problems"] or 0
+        attempted = book["attempted_problems"] or 0
+        unattempted_total += book.pop("unattempted_main") or 0
         book["attempted_problems"] = attempted
         book["progress_percent"] = round(attempted / total * 100) if total else 0
 
-    exam_target_date = _get_setting(conn, "exam_target_date")
-    # 2026-09-08にEXERCISEセクションを今日タブの出題対象から除外した際、ここのペース計算だけ
-    # 直し忘れていた(EXERCISE分の未着手問題が「残り」に永久にカウントされ続け、pace_per_dayが
-    # 実態より過大に出る不整合があった)。queue_todayと同じ条件に揃えて2026-09-16に修正。
-    unattempted_total = conn.execute(
-        "SELECT COUNT(*) FROM problems p JOIN sections s ON p.section_id = s.id "
-        "WHERE p.srs_last_rating IS NULL AND p.retired_at IS NULL AND s.name != 'EXERCISE'"
-    ).fetchone()[0]
+    exam_target_date = settings.get("exam_target_date")
 
     days_left = None
     pace_per_day = None
@@ -766,17 +761,23 @@ def stats_overview(date: str):
     dist_map = {r[0]: r[1] for r in dist_rows}
     rating_distribution = {str(r): dist_map.get(r, 0) for r in (1, 2, 3, 4, 5)}
 
-    # 正答率推移(Phase2): dateを含む週から遡って8週分。実際に解いた記録(source='solve')のみ集計
+    # 正答率推移(Phase2): 実際に解いた記録(source='solve')のみ集計。
+    # 2026-09-27: 旧実装は「dateから始まる7日」を最新の週にしていたため、最新の週が今日1日分だけ
+    # (未来の6日を含む)になり、朝に数問解いただけで平均が急落して見えた。今日で終わる7日ごとに区切る。
+    oldest_start = add_days(date, -7 * 7 - 6)
+    bucket_rows = conn.execute(
+        "SELECT CAST((julianday(?) - julianday(local_date)) / 7 AS INTEGER) AS bucket, COUNT(*), AVG(rating) "
+        "FROM attempts WHERE source = 'solve' AND local_date BETWEEN ? AND ? GROUP BY bucket",
+        (date, oldest_start, date),
+    ).fetchall()
+    buckets = {r[0]: (r[1], r[2]) for r in bucket_rows}
     weekly_trend = []
     for i in range(7, -1, -1):
-        week_start = add_days(date, -7 * i)
-        week_end = add_days(week_start, 6)
-        cnt, avg = conn.execute(
-            "SELECT COUNT(*), AVG(rating) FROM attempts WHERE source = 'solve' AND local_date BETWEEN ? AND ?",
-            (week_start, week_end),
-        ).fetchone()
+        week_end = add_days(date, -7 * i)
+        cnt, avg = buckets.get(i, (0, None))
         weekly_trend.append({
-            "week_start": week_start,
+            "week_start": add_days(week_end, -6),
+            "week_end": week_end,
             "count": cnt,
             "avg_rating": round(avg, 2) if avg is not None else None,
         })

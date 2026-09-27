@@ -136,23 +136,66 @@ def _open_connection():
     return libsql.connect(str(DB_PATH))
 
 
+# 書き込みは同時に1本だけにする(2026-09-28)。libsqlはTursoとの通信を待つ間もPythonのGILを握ったまま
+# なので、2本の書き込みが同時に来ると「先に書き込み権を取ったAのcommit」が「Aの書き込み権が空くのを
+# 待つB」にGILを奪われて進めず、Turso側でAのトランザクションが"idle for too long"として取り消されていた
+# (Compassでカレンダーの×を続けて押すと一部の削除が500になった不具合と同じ。Drillでも評価を続けて押すと起きうる)。
+# Lock.acquireはGILを手放して待つので、ここで順番待ちさせればAのcommitは止まらない。
+_write_lock = threading.Lock()
+_WRITE_LOCK_TIMEOUT_S = 15  # commit漏れ等で解放されなかった場合でも、永久に止まらないための上限
+
+_READ_PREFIXES = ("SELECT", "PRAGMA", "EXPLAIN")
+
+
+def _is_write(name, args):
+    if name == "executescript":
+        return True
+    if name not in ("execute", "executemany") or not args:
+        return False
+    return not str(args[0]).lstrip().upper().startswith(_READ_PREFIXES)
+
+
 class _PooledConnection:
     """生のlibsql接続をラップし、close()を無視して接続をスレッドローカルに使い回すためのプロキシ。
     呼び出し側は今まで通り get_connection() → 使う → close() という書き方のままでよい。"""
 
     def __init__(self, conn):
         self._conn = conn
+        self._holds_write_lock = False
 
     def close(self):
+        # 実際には閉じない。次のリクエスト(同じスレッド)でも同じ接続を使い回す。
         pass
 
-    def _invalidate(self):
+    def _release_write_lock(self):
+        if self._holds_write_lock:
+            self._holds_write_lock = False
+            try:
+                _write_lock.release()
+            except RuntimeError:
+                pass
+
+    def _acquire_write_lock(self):
+        if self._holds_write_lock:
+            return
+        self._holds_write_lock = _write_lock.acquire(timeout=_WRITE_LOCK_TIMEOUT_S)
+
+    def _reconnect(self):
         try:
             self._conn.close()
         except Exception:
             pass
-        if getattr(_local, "conn", None) is self:
-            _local.conn = None
+        self._conn = _open_connection()
+
+    def _discard_leftover_transaction(self):
+        """前のリクエストがcommitせずに終わった場合の後始末(書き込み権と開きっぱなしのトランザクションを捨てる)"""
+        if not self._holds_write_lock:
+            return
+        try:
+            self._conn.rollback()
+        except Exception:
+            self._reconnect()
+        self._release_write_lock()
 
     def __getattr__(self, name):
         attr = getattr(self._conn, name)
@@ -160,11 +203,28 @@ class _PooledConnection:
             return attr
 
         def wrapper(*args, **kwargs):
+            if _is_write(name, args):
+                self._acquire_write_lock()
+            was_in_transaction = self._conn.in_transaction
             try:
-                return attr(*args, **kwargs)
+                return getattr(self._conn, name)(*args, **kwargs)
             except Exception:
-                self._invalidate()
+                # 接続そのものが壊れている可能性があるため張り直す。トランザクションの外で失敗した
+                # 1文(=まだ何も書き込まれていない)なら、新しい接続で1回だけやり直す
+                # (しばらく使っていない接続はTurso側で切られていて、最初の1文が失敗することがある)。
+                self._reconnect()
+                if name in ("execute", "executemany") and not was_in_transaction:
+                    try:
+                        return getattr(self._conn, name)(*args, **kwargs)
+                    except Exception:
+                        self._reconnect()
+                        self._release_write_lock()
+                        raise
+                self._release_write_lock()
                 raise
+            finally:
+                if name in ("commit", "rollback"):
+                    self._release_write_lock()
 
         return wrapper
 
@@ -172,6 +232,7 @@ class _PooledConnection:
 def get_connection():
     cached = getattr(_local, "conn", None)
     if cached is not None:
+        cached._discard_leftover_transaction()
         return cached
     proxy = _PooledConnection(_open_connection())
     _local.conn = proxy

@@ -3,7 +3,11 @@
 const tabButtons = document.querySelectorAll(".tab-btn");
 const tabPanels = document.querySelectorAll(".tab-panel");
 
-function switchTab(tabId) {
+// タブの切り替えをブラウザの履歴に積み、Alt+←/→・マウスの戻る/進む・Androidの戻るで
+// 前のタブへ戻れるようにする(2026-09-28、Compassと同じ方式)。popstateからの呼び出しは履歴を積まない
+function switchTab(tabId, { fromHistory = false } = {}) {
+  const prevTab = document.querySelector(".tab-panel.active")?.id;
+  if (!fromHistory && prevTab !== tabId) history.pushState({ tab: tabId }, "");
   tabButtons.forEach((b) => b.classList.toggle("active", b.dataset.tab === tabId));
   tabPanels.forEach((p) => p.classList.toggle("active", p.id === tabId));
   if (tabId === "tab-bookshelf") loadBookshelf();
@@ -11,6 +15,11 @@ function switchTab(tabId) {
   if (tabId === "tab-stats") loadStats();
 }
 tabButtons.forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
+
+history.replaceState({ tab: document.querySelector(".tab-panel.active")?.id }, "");
+window.addEventListener("popstate", (e) => {
+  if (e.state?.tab) switchTab(e.state.tab, { fromHistory: true });
+});
 
 // ---------- 設定ドロワー(下タブではなく、ヘッダーの歯車から横に出す) ----------
 

@@ -178,9 +178,11 @@ def get_book_catalog(book_id: int):
             )
         # attempt_count = 履歴パネルに並ぶ記録の件数(本棚の行に「3回」と出す、2026-09-27)。
         # Tursoは往復ごとに時間がかかるので、別クエリにせず同じSELECTの中で数える
+        # last_solved_at = 実際に解いた記録(source='solve')の最新時刻(UTC)。本棚の「前回はここまで」用(2026-09-28)
         problems = rows_to_dicts(
             conn.execute(
-                "SELECT p.*, (SELECT COUNT(*) FROM attempts a WHERE a.problem_id = p.id) AS attempt_count "
+                "SELECT p.*, (SELECT COUNT(*) FROM attempts a WHERE a.problem_id = p.id) AS attempt_count, "
+                "(SELECT MAX(a.created_at) FROM attempts a WHERE a.problem_id = p.id AND a.source = 'solve') AS last_solved_at "
                 f"FROM problems p WHERE p.section_id IN ({ph}) ORDER BY p.catalog_order, p.id",
                 section_ids,
             )

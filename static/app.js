@@ -1138,27 +1138,62 @@ function refreshBookshelfSummary() {
     })
   );
 
+  // 前回解いた問題を優先して出す(2026-09-28)。この本でまだ1問も解いていなければ最初の未着手問題を出す
   const btn = document.getElementById("continue-btn");
   btn.classList.remove("hidden");
   btn.innerHTML = "";
-  const next = findNextUnattempted(book);
-  btn.classList.toggle("done", !next);
+  const last = findLastSolved(book);
+  const target = last || findNextUnattempted(book);
+  btn.classList.toggle("done", !target);
   btn.onclick = null;
-  if (!next) {
+  if (!target) {
     btn.textContent = "この本の本編は全問着手済みです";
     return;
   }
   const label = document.createElement("span");
   label.className = "continue-label";
-  label.textContent = "▶ 続きから";
+  label.textContent = last ? "📍 前回はここまで" : "▶ ここから始める";
   const info = document.createElement("span");
-  info.textContent = `${next.section.name} #${next.problem.number}`;
+  info.textContent = `${target.section.name} #${target.problem.number}`;
   const sub = document.createElement("span");
   sub.className = "continue-sub";
-  sub.textContent = `第${next.chapter.number}章 ${next.chapter.name} ・ ${next.unit.name}`;
+  const when = last ? ` ・ ${relativeDayLabel(last.problem.last_solved_at)}` : "";
+  sub.textContent = `第${target.chapter.number}章 ${target.chapter.name} ・ ${target.unit.name}${when}`;
   info.appendChild(sub);
   btn.append(label, info);
-  btn.onclick = () => revealProblemInBookshelf(next.chapter.id, next.problem.id);
+  btn.onclick = () => revealProblemInBookshelf(target.chapter.id, target.problem.id);
+}
+
+// 本全体(EXERCISE含む)で、実際に解いた記録が一番新しい問題。もう出さない問題は除く
+function findLastSolved(book) {
+  let best = null;
+  for (const section of book.sections || []) {
+    for (const chapter of section.chapters || []) {
+      for (const unit of chapter.units || []) {
+        for (const problem of unit.problems || []) {
+          if (!problem.last_solved_at || problem.retired_at) continue;
+          if (!best || problem.last_solved_at > best.problem.last_solved_at) best = { section, chapter, unit, problem };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+// サーバーのcreated_at(SQLiteのdatetime('now')=UTCの"YYYY-MM-DD HH:MM:SS")と同じ形式の現在時刻。
+// 楽観的更新で入れる値を、サーバー由来の値と文字列比較で並べられるようにするため
+function nowUtcSqlString() {
+  return new Date().toISOString().slice(0, 19).replace("T", " ");
+}
+
+function relativeDayLabel(utcSqlString) {
+  const d = new Date(utcSqlString.replace(" ", "T") + "Z");
+  if (isNaN(d)) return "";
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const days = Math.round((startOf(new Date()) - startOf(d)) / 86400000);
+  if (days <= 0) return "今日";
+  if (days === 1) return "昨日";
+  return `${days}日前`;
 }
 
 function findCatalogProblem(problemId) {
@@ -1293,6 +1328,7 @@ function renderBookshelfRow(problem, book) {
     problem.srs_streak = preview.streak;
     problem.srs_graduated = preview.graduated ? 1 : 0;
     problem.attempt_count = (problem.attempt_count || 0) + 1;
+    problem.last_solved_at = nowUtcSqlString();
     meta.textContent = formatSrsMeta(rating, preview.nextDue, preview.graduated, problem.attempt_count);
   }
 
@@ -1306,6 +1342,7 @@ function renderBookshelfRow(problem, book) {
       srs_streak: problem.srs_streak,
       srs_graduated: problem.srs_graduated,
       attempt_count: problem.attempt_count,
+      last_solved_at: problem.last_solved_at,
     };
     const restore = () => {
       Object.assign(problem, prevFields);
@@ -1445,6 +1482,8 @@ async function refreshMetaOnly(problemId, metaEl) {
     if (cached) {
       for (const k of ["srs_last_rating", "srs_next_due_date", "srs_streak", "srs_graduated"]) cached[k] = detail[k];
       cached.attempt_count = (detail.attempts || []).length;
+      const solveTimes = (detail.attempts || []).filter((a) => a.source === "solve").map((a) => a.created_at).sort();
+      cached.last_solved_at = solveTimes.length ? solveTimes[solveTimes.length - 1] : null;
       refreshBookshelfSummary();
     }
     metaEl.textContent = detail.srs_last_rating

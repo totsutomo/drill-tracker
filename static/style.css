@@ -231,6 +231,8 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 /* 履歴行ごとの評価・メモ編集パネル(2026-09-16追加)。バッジ+間隔ぶんだけ字下げして
    どの記録に対する編集かが見た目でも分かるようにする */
 .history-edit-panel { padding: 8px 0 4px 30px; }
+/* 編集パネル内のミスタイプチップ(評価ボタンの直下) */
+.history-edit-panel .mistake-chips, .problem-history > .mistake-chips { margin: 10px 0 8px; }
 
 /* メモ */
 .notes-filters { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }

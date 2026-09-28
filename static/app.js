@@ -806,10 +806,13 @@ function renderTodayDoneEditPanel(a, panelEl) {
   saveBtn.type = "button";
   saveBtn.className = "note-edit-save";
   saveBtn.textContent = "メモを保存";
-  saveBtn.addEventListener("click", () => saveTodayDoneMemo(a, textarea.value.trim(), panelEl));
+  const save = () => saveTodayDoneMemo(a, textarea.value.trim(), panelEl);
+  saveBtn.addEventListener("click", save);
+  bindEnterToSave(textarea, save);
   actions.appendChild(saveBtn);
 
   panelEl.appendChild(btnWrap);
+  panelEl.appendChild(buildEditMistakeChips(a.mistake_type, (mt) => changeTodayDoneMistake(a, mt)));
   panelEl.appendChild(textarea);
   panelEl.appendChild(actions);
 }
@@ -837,6 +840,25 @@ async function changeTodayDoneRating(a, newRating, panelEl) {
     showToast("評価を更新しました");
   } catch (err) {
     Object.assign(a, prev);
+    renderTodayDoneSection();
+    showToast("更新に失敗しました。もう一度お試しください");
+  }
+}
+
+// ミスタイプだけの変更は削除→付け直しではなくPUT /api/attempts/{id}/rating(評価は据え置き)で済ませる。
+async function changeTodayDoneMistake(a, mistakeType) {
+  const prevMistake = a.mistake_type;
+  a.mistake_type = mistakeType;
+  renderTodayDoneSection();
+  try {
+    await api(`/api/attempts/${a.attempt_id}/rating`, {
+      method: "PUT",
+      body: JSON.stringify({ rating: a.rating, mistake_type: mistakeType }),
+    });
+    syncTodayCache();
+    showToast("ミスタイプを更新しました");
+  } catch (err) {
+    a.mistake_type = prevMistake;
     renderTodayDoneSection();
     showToast("更新に失敗しました。もう一度お試しください");
   }
@@ -996,6 +1018,33 @@ function selectRateModalRating(rating) {
   document.querySelectorAll("#rate-modal-buttons .rate-btn").forEach((b) => {
     b.style.outline = Number(b.dataset.rating) === rating ? "2px solid #fff" : "none";
   });
+}
+
+// 編集パネル(今日の済み・本棚の履歴)のメモ欄用。評価モーダルと同じく
+// Enterで保存・Shift+Enterで改行・IME変換確定のEnterは無視(2026-09-28、とっつー報告)。
+function bindEnterToSave(textarea, save) {
+  textarea.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      save();
+    }
+  });
+}
+
+// 編集パネル用のミスタイプチップ。評価ボタンと同じく押した瞬間に保存する。
+// 選択中のチップをもう一度押すと解除(null)。
+function buildEditMistakeChips(current, onChange) {
+  const wrap = document.createElement("div");
+  wrap.className = "mistake-chips";
+  state.mistakeTypes.forEach((mt) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "mistake-chip" + (mt.name === current ? " selected" : "");
+    chip.textContent = mt.name;
+    chip.addEventListener("click", () => onChange(mt.name === current ? null : mt.name));
+    wrap.appendChild(chip);
+  });
+  return wrap;
 }
 
 function renderMistakeChips() {
@@ -1606,12 +1655,17 @@ function renderHistoryEditPanel(a, problemId, editPanelEl, historyPanelEl, metaE
   saveBtn.type = "button";
   saveBtn.className = "note-edit-save";
   saveBtn.textContent = "メモを保存";
-  saveBtn.addEventListener("click", () =>
-    saveHistoryMemo(a, textarea.value.trim(), problemId, historyPanelEl, metaEl, textEl)
-  );
+  const save = () => saveHistoryMemo(a, textarea.value.trim(), problemId, historyPanelEl, metaEl, textEl);
+  saveBtn.addEventListener("click", save);
+  bindEnterToSave(textarea, save);
   actions.appendChild(saveBtn);
 
   editPanelEl.appendChild(btnWrap);
+  editPanelEl.appendChild(
+    buildEditMistakeChips(a.mistake_type, (mt) =>
+      changeHistoryMistake(a, mt, problemId, historyPanelEl, metaEl, badgeEl, textEl, editPanelEl)
+    )
+  );
   editPanelEl.appendChild(textarea);
   editPanelEl.appendChild(actions);
 }
@@ -1638,6 +1692,33 @@ async function changeHistoryRating(a, newRating, problemId, historyPanelEl, meta
     badgeEl.textContent = a.rating;
     renderHistoryText(textEl, a);
     renderHistoryEditPanel(a, problemId, editPanelEl, historyPanelEl, metaEl, badgeEl, textEl);
+    showToast("更新に失敗しました。もう一度お試しください");
+  }
+}
+
+// パネルを作り直すとメモ欄の書きかけが消えるため、チップの見た目だけ差し替える。
+async function changeHistoryMistake(a, mistakeType, problemId, historyPanelEl, metaEl, badgeEl, textEl, editPanelEl) {
+  const prevMistake = a.mistake_type;
+  const rerenderChips = () => {
+    editPanelEl.querySelector(".mistake-chips").replaceWith(
+      buildEditMistakeChips(a.mistake_type, (mt) =>
+        changeHistoryMistake(a, mt, problemId, historyPanelEl, metaEl, badgeEl, textEl, editPanelEl)
+      )
+    );
+    renderHistoryText(textEl, a);
+  };
+  a.mistake_type = mistakeType;
+  rerenderChips();
+  try {
+    await api(`/api/attempts/${a.id}/rating`, {
+      method: "PUT",
+      body: JSON.stringify({ rating: a.rating, mistake_type: mistakeType }),
+    });
+    syncCatalogCache(state.currentBookId);
+    showToast("ミスタイプを更新しました");
+  } catch (err) {
+    a.mistake_type = prevMistake;
+    rerenderChips();
     showToast("更新に失敗しました。もう一度お試しください");
   }
 }
@@ -1796,6 +1877,7 @@ function startEditNote(note, cardEl) {
     textarea.replaceWith(summaryEl);
   });
 
+  bindEnterToSave(textarea, () => saveBtn.click());
   saveBtn.addEventListener("click", async () => {
     const value = textarea.value.trim();
     if (!value) {

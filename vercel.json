@@ -1,10 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
   "regions": ["hnd1"],
-  "buildCommand": "python scripts/write_build_info.py",
-  "functions": {
-    "main.py": {
-      "maxDuration": 60
-    }
-  }
+  "buildCommand": "python scripts/write_build_info.py"
 }

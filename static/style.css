@@ -450,6 +450,23 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 .progress-track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
 .progress-track .pt-attempted { background: var(--accent); opacity: .45; }
 .progress-track .pt-mastered { background: var(--rate-5); }
+/* 1周完了の予測(2026-09-30)。遅れていても赤は使わない(早い時だけ緑) */
+.fp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.fp-big { font-size: 15px; color: var(--text-dim); }
+.fp-big b { font-size: 32px; color: var(--text); margin: 0 2px; font-variant-numeric: tabular-nums; }
+.fp-big.fp-none { font-size: 22px; color: var(--text-dim); }
+.fp-date { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.fp-bar { height: 6px; background: var(--bg-elevated); border-radius: 3px; overflow: hidden; margin: 8px 0 6px; }
+.fp-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--good)); }
+.fp-sub { font-size: 12px; color: var(--text-dim); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.fp-target { font-size: 13px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+.fp-good { color: var(--good); }
+.fp-none { color: var(--text-dim); }
+.fp-lever { background: var(--bg-elevated); border-radius: 8px; padding: 8px 12px; margin-top: 10px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.fp-bookline { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text-dim); margin-top: 4px; font-variant-numeric: tabular-nums; }
+.fp-bookline b { color: var(--text); font-size: 13px; margin: 0 1px; }
+.fp-chart { display: block; font-size: 10px; overflow: visible; }
+.fp-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
 /* 今日まだ解いていない間は炎を薄くする(昨日までの日数は保たれている合図) */
 .streak-chip.pending .streak-flame { opacity: .4; }
 

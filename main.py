@@ -870,6 +870,10 @@ MASTERED_RATING = 4
 WEAK_RATING = 2
 
 
+# 1周完了の予測の推移グラフに出す過去の日数(今日を含む8週)。ペース(直近14日)もこの範囲に収まる
+FIRST_PASS_HISTORY_DAYS = 56
+
+
 @app.get("/api/stats/detail")
 def stats_detail(date: str, book_id: Optional[int] = None):
     conn = get_connection()
@@ -877,7 +881,11 @@ def stats_detail(date: str, book_id: Optional[int] = None):
         conn.execute(
             "SELECT p.id, p.number, p.retired_at, p.starred_at, p.srs_last_rating, p.srs_next_due_date, "
             "b.id AS book_id, b.title AS book_title, s.name AS section_name, "
-            "c.id AS chapter_id, c.number AS chapter_number, c.name AS chapter_name, u.name AS unit_name "
+            "c.id AS chapter_id, c.number AS chapter_number, c.name AS chapter_name, u.name AS unit_name, "
+            # 1周完了の予測用(2026-09-30): 初めて記録した日と、初めて実際に解いた日。
+            # 往復を増やさないよう相関サブクエリで同じ問い合わせに載せる(attempts.problem_idに索引あり)
+            "(SELECT MIN(a.local_date) FROM attempts a WHERE a.problem_id = p.id) AS first_date, "
+            "(SELECT MIN(a.local_date) FROM attempts a WHERE a.problem_id = p.id AND a.source = 'solve') AS first_solve_date "
             f"FROM problems p {PROBLEM_DISPLAY_JOINS} "
             "ORDER BY b.sort_order, b.id, s.sort_order, c.sort_order, c.id, p.catalog_order"
         )
@@ -891,11 +899,17 @@ def stats_detail(date: str, book_id: Optional[int] = None):
         (MASTERED_RATING, since, date) + ((book_id,) if book_id is not None else ()),
     ).fetchall()
     solved_dates, freeze_dates = set(), set()
+    exam_target_date = None
+    # 目標日も同じ往復で読む(1周完了の予測の比較線用)
     for kind, d in conn.execute(
         "SELECT DISTINCT 's', local_date FROM attempts WHERE source = 'solve' "
-        "UNION ALL SELECT 'f', date FROM streak_freezes"
+        "UNION ALL SELECT 'f', date FROM streak_freezes "
+        "UNION ALL SELECT 't', value FROM settings WHERE key = 'exam_target_date'"
     ).fetchall():
-        (solved_dates if kind == "s" else freeze_dates).add(d)
+        if kind == "t":
+            exam_target_date = d or None
+        else:
+            (solved_dates if kind == "s" else freeze_dates).add(d)
     conn.close()
 
     # 最長の連続日数(フリーズで守った日も連続に含める。ヘッダーの連続日数と同じ数え方)
@@ -940,6 +954,25 @@ def stats_detail(date: str, book_id: Optional[int] = None):
             if p["srs_last_rating"] >= MASTERED_RATING:
                 g["mastered"] += 1
 
+    # 1周完了の予測(2026-09-30): 本ごとの残り(未着手)と、直近の着手日ごとの問題数。
+    # 本を絞り込んでいても全部の本を返す(本ごとの「あと◯日」と全体の予測の両方に使う)。
+    # 本編のみ(EXERCISE・除外済みは数えない)。単元の一括評価(seed)で初めて記録した問題は
+    # 実際に解いたわけではないので、推移(残りの減り方)には入れるがペースには入れない
+    fp_since = add_days(date, -(FIRST_PASS_HISTORY_DAYS - 1))
+    fp_books = {}
+    for p in problems:
+        fp_books.setdefault(p["book_id"], {"id": p["book_id"], "label": p["book_title"], "total": 0, "remaining": 0, "started": {}, "started_other": {}})
+    for p in problems:
+        if p["section_name"] == "EXERCISE" or p["retired_at"]:
+            continue
+        fb = fp_books[p["book_id"]]
+        fb["total"] += 1
+        if p["srs_last_rating"] is None:
+            fb["remaining"] += 1
+        elif p["first_date"] and p["first_date"] >= fp_since:
+            key = "started" if p["first_solve_date"] == p["first_date"] else "started_other"
+            fb[key][p["first_date"]] = fb[key].get(p["first_date"], 0) + 1
+
     weak = [p for p in main_live if p["srs_last_rating"] is not None and p["srs_last_rating"] <= WEAK_RATING]
     weak.sort(key=lambda p: (p["srs_next_due_date"] or "", p["srs_last_rating"]))
 
@@ -957,6 +990,7 @@ def stats_detail(date: str, book_id: Optional[int] = None):
             for p in weak[:30]
         ],
         "starred_total": sum(1 for p in in_scope if p["starred_at"]),
+        "first_pass": {"exam_target_date": exam_target_date, "books": list(fp_books.values())},
     }
 
 

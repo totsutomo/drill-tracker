@@ -1,0 +1,11 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+data.db
+.env
+build_info.txt
+*.log
+start_local.ps1
+.claude/
+scripts/import_warnings.txt

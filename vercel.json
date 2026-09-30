@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["hnd1"],
+  "buildCommand": "python scripts/write_build_info.py",
+  "functions": {
+    "main.py": {
+      "maxDuration": 60
+    }
+  }
+}

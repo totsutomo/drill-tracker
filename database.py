@@ -268,6 +268,11 @@ def _migrate(conn):
     cols = {row[1] for row in conn.execute("PRAGMA table_info(problems)").fetchall()}
     if "starred_at" not in cols:
         conn.execute("ALTER TABLE problems ADD COLUMN starred_at TEXT")
+    # 本ごとの「1周の目標日」(2026-09-30)。NZ留学中は手元にある本(数Ⅱ・B・C)だけ帰国日までに1周する、
+    # のように本によって締切が違う(手元にない本は目標なし)ため、settingsの受験日1つではなく本ごとに持つ
+    book_cols = {row[1] for row in conn.execute("PRAGMA table_info(books)").fetchall()}
+    if "first_pass_target" not in book_cols:
+        conn.execute("ALTER TABLE books ADD COLUMN first_pass_target TEXT")
     conn.commit()
 
 

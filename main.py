@@ -882,6 +882,7 @@ def stats_detail(date: str, book_id: Optional[int] = None):
             "SELECT p.id, p.number, p.retired_at, p.starred_at, p.srs_last_rating, p.srs_next_due_date, "
             "b.id AS book_id, b.title AS book_title, s.name AS section_name, "
             "c.id AS chapter_id, c.number AS chapter_number, c.name AS chapter_name, u.name AS unit_name, "
+            "b.first_pass_target AS book_target, "
             # 1周完了の予測用(2026-09-30): 初めて記録した日と、初めて実際に解いた日。
             # 往復を増やさないよう相関サブクエリで同じ問い合わせに載せる(attempts.problem_idに索引あり)
             "(SELECT MIN(a.local_date) FROM attempts a WHERE a.problem_id = p.id) AS first_date, "
@@ -899,17 +900,11 @@ def stats_detail(date: str, book_id: Optional[int] = None):
         (MASTERED_RATING, since, date) + ((book_id,) if book_id is not None else ()),
     ).fetchall()
     solved_dates, freeze_dates = set(), set()
-    exam_target_date = None
-    # 目標日も同じ往復で読む(1周完了の予測の比較線用)
     for kind, d in conn.execute(
         "SELECT DISTINCT 's', local_date FROM attempts WHERE source = 'solve' "
-        "UNION ALL SELECT 'f', date FROM streak_freezes "
-        "UNION ALL SELECT 't', value FROM settings WHERE key = 'exam_target_date'"
+        "UNION ALL SELECT 'f', date FROM streak_freezes"
     ).fetchall():
-        if kind == "t":
-            exam_target_date = d or None
-        else:
-            (solved_dates if kind == "s" else freeze_dates).add(d)
+        (solved_dates if kind == "s" else freeze_dates).add(d)
     conn.close()
 
     # 最長の連続日数(フリーズで守った日も連続に含める。ヘッダーの連続日数と同じ数え方)
@@ -961,7 +956,10 @@ def stats_detail(date: str, book_id: Optional[int] = None):
     fp_since = add_days(date, -(FIRST_PASS_HISTORY_DAYS - 1))
     fp_books = {}
     for p in problems:
-        fp_books.setdefault(p["book_id"], {"id": p["book_id"], "label": p["book_title"], "total": 0, "remaining": 0, "started": {}, "started_other": {}})
+        fp_books.setdefault(p["book_id"], {
+            "id": p["book_id"], "label": p["book_title"], "target_date": p["book_target"] or None,
+            "total": 0, "remaining": 0, "started": {}, "started_other": {},
+        })
     for p in problems:
         if p["section_name"] == "EXERCISE" or p["retired_at"]:
             continue
@@ -990,7 +988,7 @@ def stats_detail(date: str, book_id: Optional[int] = None):
             for p in weak[:30]
         ],
         "starred_total": sum(1 for p in in_scope if p["starred_at"]),
-        "first_pass": {"exam_target_date": exam_target_date, "books": list(fp_books.values())},
+        "first_pass": {"books": list(fp_books.values())},
     }
 
 
@@ -1028,6 +1026,8 @@ def stats_heatmap():
 class SettingsUpdate(BaseModel):
     daily_target: Optional[int] = None
     exam_target_date: Optional[str] = None
+    # 本ごとの1周の目標日 {book_id: "YYYY-MM-DD" | null}。nullで目標なしに戻す
+    book_targets: Optional[dict[int, Optional[str]]] = None
 
 
 @app.get("/api/settings")
@@ -1052,6 +1052,11 @@ def update_settings(payload: SettingsUpdate):
             "INSERT INTO settings (key, value) VALUES ('exam_target_date', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (payload.exam_target_date,),
+        )
+    if payload.book_targets:
+        conn.executemany(
+            "UPDATE books SET first_pass_target = ? WHERE id = ?",
+            [(d or None, book_id) for book_id, d in payload.book_targets.items()],
         )
     conn.commit()
     conn.close()

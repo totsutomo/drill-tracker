@@ -2201,7 +2201,8 @@ function renderStatsDetail(d) {
 // ---------- 統計タブ: 1周完了の予測(2026-09-30、Stackのsrc/firstPass.tsと同じ考え方) ----------
 // 「1周」= 本編の全問題に1回は手をつけること(覚えたかどうかは進捗の「習得」で見る)。
 // ペースは直近14日(今日を含む)の平均。7日だと1日休んだだけで予測が大きく揺れ、30日だと最近の頑張りが反映されにくい。
-// 比較線はStackの「1週間前の予想」ではなく、目標日(設定)にちょうど0になる線。遅れていても赤にはしない
+// 比較線はStackの「1週間前の予想」ではなく、目標日にちょうど0になる線。目標日は本ごと(設定、NZ留学中は手元にある
+// 本だけ帰国日までに、のように本によって違う)。遅れていても赤にはしない
 const FP_PACE_DAYS = 14;
 const FP_HISTORY_DAYS = 56; // main.pyのFIRST_PASS_HISTORY_DAYSと同じ
 const FP_PLUS = 1;
@@ -2280,50 +2281,98 @@ function fmtShortDate(dateStr, today) {
   return y === Number(today.slice(0, 4)) ? `${m}/${d}` : `${y}/${m}/${d}`;
 }
 
+/** 本の名前を「数Ⅱ・B・C」のようにまとめる(2冊目以降は「数」を省く) */
+function joinBookNames(books) {
+  return books.map((b, i) => {
+    const t = shortBookTitle(b.label);
+    return i > 0 ? t.replace(/^数学?/, "") : t.replace(/^数学/, "数");
+  }).join("・");
+}
+
+/**
+ * 予測の中身(あと◯日・目標との差・ペース・「こうすれば」)。
+ * 目標日は本ごと(設定)。同じ目標日の本はまとめて1つの予測にする
+ */
+function firstPassSectionHtml(f, today) {
+  const started = f.total - f.remaining;
+  let html = '<div class="fp-head">';
+  if (f.remaining === 0) html += '<span class="fp-big">1周完了</span>';
+  else if (f.days === null) html += '<span class="fp-big fp-none">ペースなし</span>';
+  else html += `<span class="fp-big">あと<b>${f.days.toLocaleString()}</b>日</span><span class="fp-date">${fmtShortDate(f.finishDate, today)}ごろ</span>`;
+  html += "</div>";
+  html += `<div class="fp-bar"><i style="width:${(started / f.total) * 100}%"></i></div>`;
+  html += `<div class="fp-sub">着手 ${started.toLocaleString()} / ${f.total.toLocaleString()}問(本編のみ)</div>`;
+  if (f.remaining === 0) return html;
+  if (f.targetDate) {
+    const target = fmtShortDate(f.targetDate, today);
+    if (f.targetDays <= 0) {
+      html += `<div class="fp-target">目標 ${target} を過ぎています</div>`;
+    } else if (f.finishDate) {
+      const diff = daysBetweenDates(f.finishDate, f.targetDate);
+      const rel = diff > 0 ? `より <b class="fp-good">${diff}日早い</b>` : diff < 0 ? `より <b>${-diff}日遅い</b>` : "にちょうど";
+      html += `<div class="fp-target">目標 ${target} ${rel}</div>`;
+    } else {
+      html += `<div class="fp-target">目標 ${target} まであと${f.targetDays}日</div>`;
+    }
+  }
+  const paceText = f.pace > 0 ? `直近${FP_PACE_DAYS}日: ${fmtRate(f.pace)}問/日` : `直近${FP_PACE_DAYS}日は新しい問題に手をつけていません`;
+  const needText = f.need != null ? `(目標に必要: ${fmtRate(f.need)}問/日)` : "";
+  html += `<div class="fp-sub">${paceText}${needText}</div>`;
+  if (f.lever) {
+    const how = f.lever.kind === "restart" ? `1日${f.lever.perDay}問で再開すれば` : `+${FP_PLUS}問/日(${fmtRate(f.lever.perDay)}問/日)なら`;
+    html += `<div class="fp-lever">${how} <b>${f.lever.days.toLocaleString()}日</b>(${fmtShortDate(f.lever.finishDate, today)})</div>`;
+  }
+  return html;
+}
+
 function renderFirstPass(d) {
   const card = document.getElementById("stats-firstpass-card");
   const chartCard = document.getElementById("stats-burndown-card");
   const fp = d.first_pass;
   if (!fp) return; // 古い形のキャッシュ(この機能の追加前)。サーバーの応答で描き直される
   const today = todayStr();
-  const scoped = state.statsBookId != null ? fp.books.filter((b) => b.id === state.statsBookId) : fp.books;
-  const input = combineFirstPass(scoped);
-  card.classList.toggle("hidden", input.total === 0);
-  chartCard.classList.toggle("hidden", input.total === 0);
-  if (input.total === 0) return;
-  const f = forecastFirstPass(input, today, fp.exam_target_date);
-  const scopeName = state.statsBookId != null && scoped[0] ? ` · ${shortBookTitle(scoped[0].label)}` : "";
-  document.getElementById("stats-firstpass-title").textContent = `1周完了の予測${scopeName}`;
-  document.getElementById("stats-burndown-title").textContent = `未着手の推移${scopeName}`;
+  const books = fp.books.filter((b) => b.total > 0 && (state.statsBookId == null || b.id === state.statsBookId));
+  card.classList.toggle("hidden", books.length === 0);
+  chartCard.classList.toggle("hidden", books.length === 0);
+  if (books.length === 0) return;
 
-  const started = f.total - f.remaining;
-  let html = '<div class="fp-head">';
-  if (f.remaining === 0) html += '<span class="fp-big">1周完了</span>';
-  else if (f.days === null) html += '<span class="fp-big fp-none">ペースなし</span>';
-  else html += `<span class="fp-big">あと<b>${f.days.toLocaleString()}</b>日</span><span class="fp-date">${f.finishDate}ごろ</span>`;
-  html += "</div>";
-  html += `<div class="fp-bar"><i style="width:${(started / f.total) * 100}%"></i></div>`;
-  html += `<div class="fp-sub">着手 ${started.toLocaleString()} / ${f.total.toLocaleString()}問(本編のみ)</div>`;
-  if (f.remaining > 0) {
-    if (f.targetDays > 0 && f.finishDate) {
-      const diff = daysBetweenDates(f.finishDate, f.targetDate);
-      const rel = diff > 0 ? `より <b class="fp-good">${diff}日早い</b>` : diff < 0 ? `より <b>${-diff}日遅い</b>` : "にちょうど";
-      html += `<div class="fp-target">目標 ${f.targetDate} ${rel}</div>`;
-    } else if (f.targetDays > 0) {
-      html += `<div class="fp-target">目標 ${f.targetDate} まであと${f.targetDays}日</div>`;
-    }
-    const paceText = f.pace > 0 ? `直近${FP_PACE_DAYS}日: ${fmtRate(f.pace)}問/日` : `直近${FP_PACE_DAYS}日は新しい問題に手をつけていません`;
-    const needText = f.need != null ? `(目標に必要: ${fmtRate(f.need)}問/日)` : "";
-    html += `<div class="fp-sub">${paceText}${needText}</div>`;
-    if (f.lever) {
-      const how = f.lever.kind === "restart" ? `1日${f.lever.perDay}問で再開すれば` : `+${FP_PLUS}問/日(${fmtRate(f.lever.perDay)}問/日)なら`;
-      html += `<div class="fp-lever">${how} <b>${f.lever.days.toLocaleString()}日</b>(${f.lever.finishDate})</div>`;
-    }
+  // 目標日ごとにまとめる(近い順)。目標のない本は最後に「目標なし」として分ける
+  const byTarget = new Map();
+  books.filter((b) => b.target_date).forEach((b) => byTarget.set(b.target_date, [...(byTarget.get(b.target_date) || []), b]));
+  const groups = [...byTarget.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, bs]) => ({ date, books: bs }));
+  const noTarget = books.filter((b) => !b.target_date);
+  const bookScoped = state.statsBookId != null;
+
+  let html = "";
+  let chart = null; // グラフに出すのは一番近い目標(目標がなければ全部)
+  let chartName = "";
+  if (groups.length === 0) {
+    const f = forecastFirstPass(combineFirstPass(books), today, null);
+    html += firstPassSectionHtml(f, today);
+    chart = f;
+    chartName = bookScoped ? shortBookTitle(books[0].label) : "";
   }
-  if (!fp.exam_target_date) html += '<p class="stats-note">目標日は設定から設定できます</p>';
+  groups.forEach((g, i) => {
+    const f = forecastFirstPass(combineFirstPass(g.books), today, g.date);
+    const names = joinBookNames(g.books);
+    html += `<div class="fp-group${i > 0 ? " fp-group-next" : ""}">`;
+    html += `<div class="fp-group-title">${fmtShortDate(g.date, today)}までの目標 · ${names}</div>`;
+    html += firstPassSectionHtml(f, today) + "</div>";
+    if (i === 0) {
+      chart = f;
+      chartName = names;
+    }
+  });
+  if (groups.length > 0 && noTarget.length > 0) {
+    const left = noTarget.reduce((s, b) => s + b.remaining, 0);
+    html += `<div class="fp-notarget">目標なし: ${joinBookNames(noTarget)}(未着手 ${left.toLocaleString()}問)</div>`;
+  }
+  if (groups.length === 0 && !bookScoped) html += '<p class="stats-note">本ごとの1周の目標日は設定から入れられます</p>';
+  document.getElementById("stats-firstpass-title").textContent = bookScoped ? `1周完了の予測 · ${shortBookTitle(books[0].label)}` : "1周完了の予測";
   document.getElementById("stats-firstpass").innerHTML = html;
+  document.getElementById("stats-burndown-title").textContent = chartName ? `未着手の推移 · ${chartName}` : "未着手の推移";
 
-  state.statsBurndown = f;
+  state.statsBurndown = chart;
   renderBurndown();
 }
 
@@ -2332,20 +2381,20 @@ function firstPassBookLine(d, bookId) {
   const b = d.first_pass && d.first_pass.books.find((x) => x.id === bookId);
   if (!b || b.total === 0) return null;
   const today = todayStr();
-  const f = forecastFirstPass(b, today, null);
+  const f = forecastFirstPass(b, today, b.target_date);
   const line = document.createElement("div");
   line.className = "fp-bookline";
   const left = document.createElement("span");
   const right = document.createElement("span");
+  const target = b.target_date ? ` · 目標${fmtShortDate(b.target_date, today)}` : " · 目標なし";
   if (f.remaining === 0) {
     right.textContent = "1周完了";
   } else if (f.days === null) {
     left.textContent = `直近${FP_PACE_DAYS}日 0問`;
-    right.textContent = "ペースなし";
-    right.className = "fp-none";
+    right.innerHTML = `<span class="fp-none">ペースなし</span>${target}`;
   } else {
     left.textContent = `${fmtRate(f.pace)}問/日`;
-    right.innerHTML = `あと<b>${f.days.toLocaleString()}</b>日(${fmtShortDate(f.finishDate, today)}ごろ)`;
+    right.innerHTML = `あと<b>${f.days.toLocaleString()}</b>日(${fmtShortDate(f.finishDate, today)}ごろ)${target}`;
   }
   line.append(left, right);
   return line;
@@ -2396,22 +2445,32 @@ function renderBurndown() {
     s += `<line x1="${L}" x2="${W - R}" y1="${y(g)}" y2="${y(g)}" stroke="var(--bg-elevated)" />`;
     s += `<text x="${L - 4}" y="${y(g) + 3}" text-anchor="end" fill="var(--text-dim)">${g.toLocaleString()}</text>`;
   });
-  // 月の初めごとに縦線。ラベルは重ならない間隔に間引く
   const xLabels = [{ x: x(0), s: "今日", anchor: "middle", strong: true }];
   // 目標日が遠いと過去8週ぶんは左端の狭い帯になるので、「今日」とぶつかる時は「8週前」を出さない
   if (x(0) - x(-past) >= 56) xLabels.push({ x: x(-past), s: "8週前", anchor: "start" });
-  const m = new Date(addDaysLocal(today, -past) + "T00:00:00");
-  m.setDate(1);
   let lastLabelX = -Infinity;
-  for (m.setMonth(m.getMonth() + 1); ; m.setMonth(m.getMonth() + 1)) {
-    const day = daysBetweenDates(today, formatLocalDate(m));
-    if (day > future) break;
-    const mx = x(day);
-    s += `<line x1="${mx}" x2="${mx}" y1="${T}" y2="${H - B}" stroke="var(--bg-elevated)" stroke-dasharray="2 3" />`;
-    const clear = xLabels.every((l) => Math.abs(l.x - mx) >= 34) && mx - lastLabelX >= 40 && mx + 16 <= W;
+  const gridAt = (day, label) => {
+    const gx = x(day);
+    s += `<line x1="${gx}" x2="${gx}" y1="${T}" y2="${H - B}" stroke="var(--bg-elevated)" stroke-dasharray="2 3" />`;
+    const clear = xLabels.every((l) => Math.abs(l.x - gx) >= 34) && gx - lastLabelX >= 40 && gx + 16 <= W;
     if (clear) {
-      xLabels.push({ x: mx, s: m.getMonth() === 0 ? `${m.getFullYear()}/1` : `${m.getMonth() + 1}月`, anchor: "middle" });
-      lastLabelX = mx;
+      xLabels.push({ x: gx, s: label, anchor: "middle" });
+      lastLabelX = gx;
+    }
+  };
+  if (past + future <= 200) {
+    // 半年くらいまでは1週間ごと(今日から数えて7日おき)に縦線、日付のラベルは重ならない間隔に間引く
+    for (let day = -Math.floor(past / 7) * 7; day <= future; day += 7) {
+      if (day !== 0) gridAt(day, fmtShortDate(addDaysLocal(today, day), today));
+    }
+  } else {
+    // それより長い時は月の初めごと
+    const m = new Date(addDaysLocal(today, -past) + "T00:00:00");
+    m.setDate(1);
+    for (m.setMonth(m.getMonth() + 1); ; m.setMonth(m.getMonth() + 1)) {
+      const day = daysBetweenDates(today, formatLocalDate(m));
+      if (day > future) break;
+      gridAt(day, m.getMonth() === 0 ? `${m.getFullYear()}/1` : `${m.getMonth() + 1}月`);
     }
   }
   const pts = f.history.map((v, i) => `${x(i - past)},${y(v)}`).join(" ");
@@ -2420,7 +2479,10 @@ function renderBurndown() {
   const showTarget = targetDays > 0 && f.remaining > 0;
   if (showTarget) {
     s += `<line x1="${x(-past)}" y1="${y(f.history[0])}" x2="${x(targetDays)}" y2="${y(0)}" stroke="var(--good)" stroke-width="2" />`;
-    s += txt(x(targetDays) - 2, y(0) - 8, `目標 ${fmtShortDate(f.targetDate, today)}`, 'text-anchor="end" fill="var(--good)"');
+    // 線の終わり(目標日の0)の右側は空いているのでそこに書く。右端に余裕がなければ左上に
+    const tx = x(targetDays);
+    const roomRight = tx + 64 <= W;
+    s += txt(roomRight ? tx + 5 : tx - 4, y(0) - 6, `目標 ${fmtShortDate(f.targetDate, today)}`, `text-anchor="${roomRight ? "start" : "end"}" fill="var(--good)"`);
   }
   s += `<polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2" />`;
   const now = f.history[past];
@@ -2432,7 +2494,8 @@ function renderBurndown() {
     s += `<line x1="${x(0)}" y1="${y(now)}" x2="${x(endDay)}" y2="${y(endValue)}" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 4" />`;
     s += `<circle cx="${x(endDay)}" cy="${y(endValue)}" r="3.5" fill="var(--bg-card)" stroke="var(--accent)" stroke-width="2" />`;
     const label = (zeroDay > future ? "→ " : "") + fmtShortDate(f.finishDate, today);
-    s += txt(x(endDay), y(endValue) - 22, label, 'text-anchor="middle" fill="var(--text)" font-weight="700"');
+    // 右端で切った時は、文字がはみ出さないよう右寄せにする
+    s += txt(x(endDay), y(endValue) - 12, label, `text-anchor="${x(endDay) + 50 > W ? "end" : "middle"}" fill="var(--text)" font-weight="700"`);
   }
   s += `<circle cx="${x(0)}" cy="${y(now)}" r="3.5" fill="var(--accent)" />`;
   xLabels.forEach((l) => {
@@ -2530,6 +2593,7 @@ async function loadSettings() {
   state.settings = settings;
   document.getElementById("setting-daily-target").value = settings.daily_target || 8;
   document.getElementById("setting-exam-date").value = settings.exam_target_date || "";
+  renderBookTargetInputs(await ensureBooks().catch(() => []));
   const d = new Date(buildInfo.lastUpdated);
   document.getElementById("settings-last-updated").textContent =
     `最終更新: ${isNaN(d) ? buildInfo.lastUpdated : d.toLocaleString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}`;
@@ -2537,15 +2601,44 @@ async function loadSettings() {
 
 document.getElementById("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const bookTargets = {};
+  document.querySelectorAll("#setting-book-targets input[data-book-id]").forEach((input) => {
+    bookTargets[input.dataset.bookId] = input.value || null;
+  });
   const payload = {
     daily_target: Number(document.getElementById("setting-daily-target").value) || 8,
     exam_target_date: document.getElementById("setting-exam-date").value || null,
+    book_targets: bookTargets,
   };
   await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
   showToast("設定を保存しました");
+  // 本の一覧(端末のキャッシュ含む)にも反映して、統計タブを開き直した時に新しい目標日で描く
+  state.books.forEach((b) => {
+    if (String(b.id) in bookTargets) b.first_pass_target = bookTargets[b.id];
+  });
+  cacheSet("/api/books", state.books);
+  if (document.getElementById("tab-stats").classList.contains("active")) loadStats();
   delete state.today; // daily_target変更を今日タブへ反映させるため、次回開いた時に再取得させる
   loadToday();
 });
+
+// 本ごとの1周の目標日(2026-09-30)。空欄=目標なし(手元にない本など)
+function renderBookTargetInputs(books) {
+  const el = document.getElementById("setting-book-targets");
+  el.innerHTML = "";
+  books.forEach((b) => {
+    const row = document.createElement("label");
+    row.className = "book-target-row";
+    const name = document.createElement("span");
+    name.textContent = shortBookTitle(b.title);
+    const input = document.createElement("input");
+    input.type = "date";
+    input.dataset.bookId = b.id;
+    input.value = b.first_pass_target || "";
+    row.append(name, input);
+    el.appendChild(row);
+  });
+}
 
 // ---------- 初回セットアップ: 単元一括自己申告 ----------
 

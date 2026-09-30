@@ -466,6 +466,13 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 .fp-bookline { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text-dim); margin-top: 4px; font-variant-numeric: tabular-nums; }
 .fp-bookline b { color: var(--text); font-size: 13px; margin: 0 1px; }
 .fp-chart { display: block; font-size: 10px; overflow: visible; }
+.fp-group-title { font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 4px; }
+.fp-group-next { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
+.fp-notarget { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 10px; font-size: 12px; color: var(--text-dim); }
+.settings-group { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--text-dim); }
+.settings-group small { font-size: 11px; }
+.book-target-row { flex-direction: row !important; align-items: center; justify-content: space-between; gap: 8px; }
+.book-target-row span { color: var(--text); }
 .fp-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
 /* 今日まだ解いていない間は炎を薄くする(昨日までの日数は保たれている合図) */
 .streak-chip.pending .streak-flame { opacity: .4; }

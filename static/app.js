@@ -310,6 +310,14 @@ function formatLocalDate(d) {
 }
 function todayStr() { return formatLocalDate(new Date()); }
 
+// study-tracker(Compass)側のlogged_atと同じ"YYYY-MM-DD HH:MM:SS"形式・端末ローカル時刻
+// (vocab-appのstudyTrackerSync.ts、study-tracker app.jsのnowLocalTimestampと同方針)
+function nowLocalTimestamp() {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
 function newClientId() {
   if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
   return "cid-" + Date.now() + "-" + Math.random().toString(16).slice(2);
@@ -355,6 +363,16 @@ function formatSrsMeta(rating, nextDue, graduated, count) {
 const ICON_PENCIL =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
   '<path d="M4 20l4-1 11-11a2 2 0 0 0-3-3L5 16l-1 4z"/></svg>';
+// 「もう出さない」(スマホの2段レイアウトでは文字を隠してこのアイコンだけにする、2026-10-02)
+const ICON_RETIRE =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+  '<circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>';
+function setRetireLabel(btn, retired) {
+  const label = retired ? "解除" : "もう出さない";
+  btn.innerHTML = `${ICON_RETIRE}<span class="retire-label">${label}</span>`;
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+}
 const ICON_TRASH =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
   '<path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/>' +
@@ -414,9 +432,25 @@ async function submitAttempt(problem, rating, { memo = null, mistakeType = null 
     memo,
     mistake_type: mistakeType,
   };
-  // 2026-10-01: 以前はここでCompassへ「数学 0分」の記録を1問ごとに自動送信していたが、
-  // Compassの学習ログが0分の行で埋まるため廃止(勉強時間はCompassのタイマーで記録する)
-  return await api("/api/attempts", { method: "POST", body: JSON.stringify(payload) });
+  const result = await api("/api/attempts", { method: "POST", body: JSON.stringify(payload) });
+  syncAttemptToStudyTracker();
+  return result;
+}
+
+// Compass(study-tracker、別オリジン)へこのattemptを自動記録。ベストエフォートで、
+// 失敗してもUIには一切影響させない(vocab-appのsyncStudySessionと同方針、2026-09-19)。
+// 2026-10-01に「Compassの学習ログが数学0分の行で埋まる」ため一度廃止したが、問題数はCompassの
+// ヒートマップ・今日の実績に使うので10-02に復活。0分の行はCompass側の学習ログ一覧で隠す。
+function syncAttemptToStudyTracker() {
+  const config = window.DRILL_SYNC_CONFIG;
+  if (!config || !config.studyTrackerUrl || !config.studyTrackerToken) return;
+  const url = `${config.studyTrackerUrl}/api/study-logs/drill-sync?token=${encodeURIComponent(config.studyTrackerToken)}`;
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ count: 1, logged_at: nowLocalTimestamp() }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 // ---------- 今日タブ ----------
@@ -460,7 +494,7 @@ function renderTodayRow(problem) {
   wrap.className = "problem-row-wrap";
 
   const row = document.createElement("div");
-  row.className = "problem-row";
+  row.className = "problem-row problem-row-rate";
   row.dataset.problemId = problem.id;
 
   const historyPanel = document.createElement("div");
@@ -1321,7 +1355,7 @@ function renderBookshelfRow(problem, book) {
   wrap.className = "problem-row-wrap";
 
   const row = document.createElement("div");
-  row.className = "problem-row problem-row-book" + (problem.retired_at ? " retired" : "");
+  row.className = "problem-row problem-row-rate problem-row-book" + (problem.retired_at ? " retired" : "");
   row.dataset.problemId = problem.id;
 
   const historyPanel = document.createElement("div");
@@ -1437,12 +1471,12 @@ function renderBookshelfRow(problem, book) {
 
   const retireBtn = document.createElement("button");
   retireBtn.className = "retire-btn retire-toggle" + (problem.retired_at ? " active" : "");
-  retireBtn.textContent = problem.retired_at ? "解除" : "もう出さない";
+  setRetireLabel(retireBtn, !!problem.retired_at);
   retireBtn.addEventListener("click", async () => {
     const wasRetired = !!problem.retired_at;
     problem.retired_at = wasRetired ? null : "now";
     retireBtn.classList.toggle("active", !wasRetired);
-    retireBtn.textContent = wasRetired ? "もう出さない" : "解除";
+    setRetireLabel(retireBtn, !wasRetired);
     row.classList.toggle("retired", !wasRetired);
     refreshBookshelfSummary();
     try {
@@ -1451,7 +1485,7 @@ function renderBookshelfRow(problem, book) {
     } catch (err) {
       problem.retired_at = wasRetired ? "now" : null;
       retireBtn.classList.toggle("active", wasRetired);
-      retireBtn.textContent = wasRetired ? "解除" : "もう出さない";
+      setRetireLabel(retireBtn, wasRetired);
       row.classList.toggle("retired", wasRetired);
       refreshBookshelfSummary();
       showToast("更新に失敗しました。もう一度お試しください");

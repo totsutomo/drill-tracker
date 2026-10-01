@@ -984,6 +984,41 @@ def stats_detail(date: str, book_id: Optional[int] = None):
     }
 
 
+# Compassの科目別まとめ表(Scoresタブ)用の読み取り専用の集計(2026-10-02)。/api/stats/overviewは
+# 連続日数のフリーズを精算して書き込むため、外部から定期的に読まれる用途には使わない。
+# 進み具合はstats_overviewの本ごとの進捗と同じ数え方(一度でも解いた問題/全問題)、
+# 解いた数・平均評価は実際に解いた記録(source='solve')だけを、直近days日とその直前days日で比べる。
+@app.get("/api/stats/summary")
+def stats_summary(date: str, days: int = 7):
+    days = max(1, min(days, 180))
+    current_start = add_days(date, -(days - 1))
+    previous_start = add_days(date, -(2 * days - 1))
+    conn = get_connection()
+    total, attempted = conn.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN srs_last_rating IS NOT NULL THEN 1 ELSE 0 END) FROM problems"
+    ).fetchone()
+    row = conn.execute(
+        "SELECT "
+        "SUM(CASE WHEN local_date >= ? THEN 1 ELSE 0 END), "
+        "AVG(CASE WHEN local_date >= ? THEN rating END), "
+        "SUM(CASE WHEN local_date < ? THEN 1 ELSE 0 END), "
+        "AVG(CASE WHEN local_date < ? THEN rating END) "
+        "FROM attempts WHERE source = 'solve' AND local_date BETWEEN ? AND ?",
+        (current_start, current_start, current_start, current_start, previous_start, date),
+    ).fetchone()
+    conn.close()
+    return {
+        "days": days,
+        "total_problems": total or 0,
+        "attempted_problems": attempted or 0,
+        "progress_percent": round((attempted or 0) / total * 100, 1) if total else 0,
+        "solved": row[0] or 0,
+        "avg_rating": round(row[1], 2) if row[1] is not None else None,
+        "prev_solved": row[2] or 0,
+        "prev_avg_rating": round(row[3], 2) if row[3] is not None else None,
+    }
+
+
 @app.get("/api/stats/heatmap")
 def stats_heatmap():
     """単元別ヒートマップ(実装プラン5章のPhase2項目)。旧Obsidianダッシュボードの

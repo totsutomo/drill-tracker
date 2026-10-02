@@ -2732,15 +2732,17 @@ function isTypingTarget(el) {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
 
-// タブ切り替え(Ctrl+1〜4、今日/本棚/メモ/統計の表示順と対応)。数字だけの
-// 1〜5キーは評価に使っているため区別が要る一方、Ctrlは日本語入力中でも
-// 素通りするテキスト編集ショートカットではないため、isTypingTarget判定より前に
+// タブ切り替え(Alt+1〜4、今日/本棚/メモ/統計の表示順と対応)。数字だけの
+// 1〜5キーは評価に使っているため修飾キーが要る。isTypingTarget判定より前に
 // 置いてテキスト欄にフォーカスがあっても効くようにする(2026-09-16追加)。
+// 2026-10-03にCtrl+数字からAlt+数字へ変更し、Compass・Stack・vocab-appとそろえた
+// (Ctrl+数字は普通のブラウザタブで開くとブラウザのタブ切替に先取りされる)。
+// Alt+数字はe.keyが配列によって変わりうるためe.codeで見る
 const TAB_SHORTCUT_ORDER = ["tab-today", "tab-bookshelf", "tab-notes", "tab-stats"];
 
 document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key >= "1" && e.key <= "4") {
-    const tabId = TAB_SHORTCUT_ORDER[Number(e.key) - 1];
+  if (e.altKey && !e.ctrlKey && !e.metaKey && /^Digit[1-4]$/.test(e.code)) {
+    const tabId = TAB_SHORTCUT_ORDER[Number(e.code.slice(5)) - 1];
     if (tabId) {
       e.preventDefault();
       switchTab(tabId);
@@ -2796,6 +2798,19 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
 
+  // / で検索(メモタブの検索欄へ)、, で設定。4アプリ共通の割り当て(2026-10-03)
+  if (e.key === "/") {
+    e.preventDefault();
+    switchTab("tab-notes");
+    document.getElementById("notes-q").focus();
+    return;
+  }
+  if (e.key === ",") {
+    e.preventDefault();
+    openSettingsDrawer();
+    return;
+  }
+
   const activeTab = document.querySelector(".tab-panel.active")?.id;
 
   // 今日タブ表示中: 1-5でキュー先頭の問題を即評価(メモなし)、Mでメモ付き評価モーダルを開く、
@@ -2831,11 +2846,11 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  // 本棚タブ: [ / ] で前後の本、Zで直前の評価を取り消す(本棚の評価ボタンもUndo対象)
+  // 本棚タブ: ← / → で前後の本(2026-10-03に [ / ] から変更、他アプリの「前/次」とそろえた)、Zで直前の評価を取り消す(本棚の評価ボタンもUndo対象)
   if (activeTab === "tab-bookshelf") {
-    if (e.key === "[" || e.key === "]") {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       e.preventDefault();
-      switchBookBy(e.key === "]" ? 1 : -1);
+      switchBookBy(e.key === "ArrowRight" ? 1 : -1);
     } else if (e.key === "z" || e.key === "Z") {
       e.preventDefault();
       undoLastRating();
@@ -2843,11 +2858,6 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  // メモタブ: / で検索欄へ
-  if (activeTab === "tab-notes" && e.key === "/") {
-    e.preventDefault();
-    document.getElementById("notes-q").focus();
-  }
 });
 
 // 開いているパネル(手前にあるものから順)を1つ閉じる。閉じたらtrue

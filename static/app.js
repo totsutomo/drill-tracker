@@ -377,7 +377,12 @@ const ICON_RETIRE =
   '<circle cx="12" cy="12" r="9"/><line x1="5.6" y1="5.6" x2="18.4" y2="18.4"/></svg>';
 function setRetireLabel(btn, retired) {
   const label = retired ? "解除" : "もう出さない";
-  btn.innerHTML = `${ICON_RETIRE}<span class="retire-label">${label}</span>`;
+  // 2つの文言を同じマスに重ねて置き、使わない方は透明にする。こうするとボタン幅が常に長い方に
+  // そろい、「解除」になっても評価ボタン列が行ごとにズレない(2026-10-05)
+  btn.innerHTML =
+    `${ICON_RETIRE}<span class="retire-label">` +
+    `<span${retired ? ' class="retire-label-hidden"' : ""}>もう出さない</span>` +
+    `<span${retired ? "" : ' class="retire-label-hidden"'}>解除</span></span>`;
   btn.title = label;
   btn.setAttribute("aria-label", label);
 }

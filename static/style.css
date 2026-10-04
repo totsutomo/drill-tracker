@@ -224,7 +224,12 @@ select, input[type="text"], input[type="search"], input[type="date"], input[type
 /* 本棚の実際の「もう出さない/解除」トグルはテキスト長が変わる(retire-btnはメモアイコンボタンと共用のため
    ここだけ固定幅にして、評価ボタン列の位置がretired状態によって行間でズレないようにする)。
    また評価ボタンのすぐ右に置くと「5」を押すつもりで誤タップしやすいため、余白を追加で1段広く取る(2026-09-07) */
-.retire-toggle { min-width: 78px; text-align: center; margin-left: 6px; gap: 4px; }
+.retire-toggle { text-align: center; margin-left: 6px; gap: 4px; }
+/* 幅の固定はmin-widthでなく、2つの文言を重ねる方式で行う(アイコン追加後はmin-widthを超えて
+   「解除」の時だけ幅が縮んでいたため、2026-10-05) */
+.retire-label { display: inline-grid; justify-items: center; }
+.retire-label > span { grid-area: 1 / 1; }
+.retire-label-hidden { visibility: hidden; }
 .problem-row.retired { opacity: 0.45; }
 .problem-info.tappable { cursor: pointer; }
 .problem-row-wrap { display: flex; flex-direction: column; gap: 0; }

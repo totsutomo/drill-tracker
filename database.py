@@ -144,6 +144,12 @@ def _open_connection():
 _write_lock = threading.Lock()
 _WRITE_LOCK_TIMEOUT_S = 15  # commit漏れ等で解放されなかった場合でも、永久に止まらないための上限
 
+
+class WriteLockTimeoutError(RuntimeError):
+    """_WRITE_LOCK_TIMEOUT_S秒待っても書き込みロックを取得できなかった場合に投げる
+    (2026-10-04。main.py側でHTTP 503「サーバーが混み合っています」に変換される想定)。"""
+
+
 _READ_PREFIXES = ("SELECT", "PRAGMA", "EXPLAIN")
 
 
@@ -178,7 +184,13 @@ class _PooledConnection:
     def _acquire_write_lock(self):
         if self._holds_write_lock:
             return
-        self._holds_write_lock = _write_lock.acquire(timeout=_WRITE_LOCK_TIMEOUT_S)
+        acquired = _write_lock.acquire(timeout=_WRITE_LOCK_TIMEOUT_S)
+        self._holds_write_lock = acquired
+        if not acquired:
+            # 取得できていないのに書き込みを続行すると、排他ロックを入れた目的
+            # (同時に2本の書き込みが走ってTurso側でcommitが巻き込まれて潰される)が
+            # 達成できない。呼び出し元(main.py)に伝えて止めるため例外にする。
+            raise WriteLockTimeoutError("write lock timeout")
 
     def _reconnect(self):
         try:

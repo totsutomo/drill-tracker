@@ -209,7 +209,15 @@ async function api(path, options = {}, retries = 3) {
   try {
     for (let attempt = 0; ; attempt++) {
       try {
-        const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+        const method = (options.method || "GET").toUpperCase();
+        const headers = { "Content-Type": "application/json" };
+        // 書き込み系(POST/PUT/DELETE)のみ鍵を付ける(2026-10-04、サーバー側がDRILL_WRITE_TOKEN
+        // を要求するようになったため)。GETはこのアプリの設計上公開のままなので付けない。
+        if (method !== "GET") {
+          const config = window.DRILL_SYNC_CONFIG;
+          if (config && config.writeToken) headers.Authorization = `Bearer ${config.writeToken}`;
+        }
+        const res = await fetch(path, { ...options, headers: { ...headers, ...(options.headers || {}) } });
         if (!res.ok) throw new Error(`API error: ${res.status}`);
         const data = await res.json();
         if (!options.method || options.method.toUpperCase() === "GET") cacheSet(path, data);

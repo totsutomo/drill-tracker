@@ -6,12 +6,13 @@ from datetime import datetime
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from database import (
+    WriteLockTimeoutError,
     add_days,
     get_connection,
     init_db,
@@ -29,6 +30,28 @@ init_db()
 # (vocab-appのstudyTrackerSync.tsと同方針、2026-09-19)。
 STUDY_TRACKER_URL = os.environ.get("STUDY_TRACKER_URL", "https://study-tracker-x6zf.onrender.com")
 STUDY_TRACKER_SYNC_TOKEN = os.environ.get("STUDY_TRACKER_SYNC_TOKEN")
+
+# 書き込み系(POST/PUT/DELETE)APIの簡易認証用トークン(2026-10-04、保守点検で全API無認証だった
+# ことが見つかったため導入)。読み取り系(GET)はこのアプリの設計上公開のままでよいので対象外。
+# 他の個人アプリ(vocab-app等)と同じ「鍵はブラウザに見えてしまうが、無いよりはマシ」という方針。
+DRILL_WRITE_TOKEN = os.environ.get("DRILL_WRITE_TOKEN")
+
+
+def require_write_token(authorization: str = Header(default=None)):
+    """書き込み系エンドポイントの依存関数。Authorization: Bearer <DRILL_WRITE_TOKEN>が
+    一致しない場合(環境変数自体が未設定の場合を含む)は401を返す。"""
+    if not DRILL_WRITE_TOKEN or authorization != f"Bearer {DRILL_WRITE_TOKEN}":
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+@app.exception_handler(WriteLockTimeoutError)
+async def write_lock_timeout_handler(request: Request, exc: WriteLockTimeoutError):
+    # 書き込みロックがタイムアウトした(=混み合っている)場合。50xで「混み合っている」ことが
+    # 伝わるようにし、呼び出し元(app.js)のリトライに任せる。
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "サーバーが混み合っています。少し待ってから再試行してください"},
+    )
 
 
 def _load_last_updated() -> str:
@@ -131,7 +154,7 @@ def list_books():
     return result
 
 
-@app.post("/api/books")
+@app.post("/api/books", dependencies=[Depends(require_write_token)])
 def create_book(payload: BookCreate):
     conn = get_connection()
     existing = conn.execute("SELECT id FROM books WHERE slug = ?", (payload.slug,)).fetchone()
@@ -290,7 +313,7 @@ class SeedAssessmentIn(BaseModel):
     local_date: str  # クライアントのローカル日付。サーバーのUTC時計は使わない
 
 
-@app.post("/api/units/{unit_id}/seed-assessment")
+@app.post("/api/units/{unit_id}/seed-assessment", dependencies=[Depends(require_write_token)])
 def seed_assessment(unit_id: int, payload: SeedAssessmentIn):
     """初回セットアップの単元一括自己申告(実装プラン7.5章)。
     既に何らかのattempt(solve/import/seedいずれか)がある問題は触らない。
@@ -338,7 +361,7 @@ class AttemptIn(BaseModel):
     mistake_type: Optional[str] = None
 
 
-@app.post("/api/attempts")
+@app.post("/api/attempts", dependencies=[Depends(require_write_token)])
 def create_attempt(payload: AttemptIn):
     if payload.rating not in (1, 2, 3, 4, 5):
         raise HTTPException(status_code=400, detail="rating must be between 1 and 5")
@@ -376,7 +399,7 @@ class AttemptMemoUpdateIn(BaseModel):
     memo: str
 
 
-@app.put("/api/attempts/{attempt_id}/memo")
+@app.put("/api/attempts/{attempt_id}/memo", dependencies=[Depends(require_write_token)])
 def update_attempt_memo(attempt_id: int, payload: AttemptMemoUpdateIn):
     """メモタブでのメモ編集用(2026-09-08追加)。評価(rating)やSRS状態には触れない。"""
     conn = get_connection()
@@ -395,7 +418,7 @@ class AttemptRatingUpdateIn(BaseModel):
     mistake_type: Optional[str] = None
 
 
-@app.put("/api/attempts/{attempt_id}/rating")
+@app.put("/api/attempts/{attempt_id}/rating", dependencies=[Depends(require_write_token)])
 def update_attempt_rating(attempt_id: int, payload: AttemptRatingUpdateIn):
     """本棚タブの履歴編集用(2026-09-16追加)。削除→付け直すと当日の日付に
     変わってしまい過去日の記録を直す用途に使えないため、local_date/sourceは
@@ -416,7 +439,7 @@ def update_attempt_rating(attempt_id: int, payload: AttemptRatingUpdateIn):
     return {"updated": True}
 
 
-@app.delete("/api/attempts/{attempt_id}")
+@app.delete("/api/attempts/{attempt_id}", dependencies=[Depends(require_write_token)])
 def delete_attempt(attempt_id: int):
     conn = get_connection()
     row = conn.execute("SELECT problem_id FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
@@ -431,7 +454,7 @@ def delete_attempt(attempt_id: int):
     return {"deleted": True}
 
 
-@app.post("/api/problems/{problem_id}/retire")
+@app.post("/api/problems/{problem_id}/retire", dependencies=[Depends(require_write_token)])
 def toggle_retire(problem_id: int):
     conn = get_connection()
     row = conn.execute("SELECT retired_at FROM problems WHERE id = ?", (problem_id,)).fetchone()
@@ -449,7 +472,7 @@ def toggle_retire(problem_id: int):
     return {"problem_id": problem_id, "retired": retired}
 
 
-@app.post("/api/problems/{problem_id}/star")
+@app.post("/api/problems/{problem_id}/star", dependencies=[Depends(require_write_token)])
 def toggle_star(problem_id: int):
     """重要マーク(2026-09-16追加)。retireと同じトグル方式。"""
     conn = get_connection()
@@ -675,7 +698,7 @@ def list_notes(
     return merged
 
 
-@app.post("/api/notes")
+@app.post("/api/notes", dependencies=[Depends(require_write_token)])
 def create_note(payload: NoteIn):
     conn = get_connection()
     cur = conn.execute(
@@ -693,7 +716,7 @@ class NoteUpdateIn(BaseModel):
     summary: str
 
 
-@app.put("/api/notes/{note_id}")
+@app.put("/api/notes/{note_id}", dependencies=[Depends(require_write_token)])
 def update_note(note_id: int, payload: NoteUpdateIn):
     conn = get_connection()
     row = conn.execute("SELECT id FROM standalone_notes WHERE id = ?", (note_id,)).fetchone()
@@ -706,7 +729,7 @@ def update_note(note_id: int, payload: NoteUpdateIn):
     return {"updated": True}
 
 
-@app.delete("/api/notes/{note_id}")
+@app.delete("/api/notes/{note_id}", dependencies=[Depends(require_write_token)])
 def delete_note(note_id: int):
     conn = get_connection()
     row = conn.execute("SELECT id FROM standalone_notes WHERE id = ?", (note_id,)).fetchone()
@@ -1073,7 +1096,7 @@ def get_settings():
     return {k: v for k, v in rows}
 
 
-@app.put("/api/settings")
+@app.put("/api/settings", dependencies=[Depends(require_write_token)])
 def update_settings(payload: SettingsUpdate):
     conn = get_connection()
     if payload.daily_target is not None:
@@ -1141,8 +1164,13 @@ def service_worker():
 
 @app.get("/config.js")
 def config_js():
-    # env var駆動でstudy-tracker連携トークンをクライアントJSへ渡す。gitにトークンを
-    # 直書きしないための橋渡しで、値自体はどのみちブラウザから見える前提(vocab-app方式と同じ)。
-    config = {"studyTrackerUrl": STUDY_TRACKER_URL, "studyTrackerToken": STUDY_TRACKER_SYNC_TOKEN}
+    # env var駆動でstudy-tracker連携トークン・書き込みAPI用トークンをクライアントJSへ渡す。
+    # gitにトークンを直書きしないための橋渡しで、値自体はどのみちブラウザから見える前提
+    # (vocab-app方式と同じ。2026-10-04にwriteToken追加)。
+    config = {
+        "studyTrackerUrl": STUDY_TRACKER_URL,
+        "studyTrackerToken": STUDY_TRACKER_SYNC_TOKEN,
+        "writeToken": DRILL_WRITE_TOKEN,
+    }
     body = f"window.DRILL_SYNC_CONFIG = {json.dumps(config)};"
     return Response(content=body, media_type="application/javascript", headers={"Cache-Control": "no-cache"})

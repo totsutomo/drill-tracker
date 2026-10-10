@@ -9,6 +9,21 @@
 <link rel="icon" href="/static/icon-192.png" />
 <link rel="apple-touch-icon" href="/static/icon-192.png" />
 <link rel="stylesheet" href="/static/style.css" />
+  <!-- 本番エラー収集(Sentry)。起きたエラーを自動で記録し、週次点検でAIに読ませる。手元(localhost・LAN内)では送らない。
+       普段はほぼ何も読み込まず、エラーが起きた時だけSentry本体を読み込む(Loader Script)。 -->
+  <script>
+    window.sentryOnLoad = function () {
+      Sentry.init({
+        environment: location.hostname,
+        enabled: !/^(localhost|127\.|10\.|192\.168\.|\[::1\])/.test(location.hostname),
+        initialScope: { tags: { app: 'drill' } },
+        tracesSampleRate: 0,
+        replaysSessionSampleRate: 0,
+        replaysOnErrorSampleRate: 0,
+      });
+    };
+  </script>
+  <script src="https://js.sentry-cdn.com/9df26cf9cc6f137577c495a2d1dbd4b0.min.js" crossorigin="anonymous"></script>
 </head>
 <body>
   <div id="top-progress-bar" class="hidden"></div>
